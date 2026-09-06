@@ -2,6 +2,7 @@
 #include "../board.hpp"
 #include <SFML/Graphics.hpp>
 #include <map>
+#include <utility>
 #include <vector>
 
 
@@ -23,7 +24,7 @@ class ChessUI {
 
 
 public:
-    ChessUI();
+    explicit ChessUI(int engineSide = 0, int searchDepth = 2);
     void run();
 
 private:
@@ -37,6 +38,8 @@ private:
     bool dragging = false;
     int draggedRow = -1;
     int draggedCol = -1;
+    int engineSearchDepth;
+    bool engineStalled = false;
     Board startingBoard;
     int currentHistoryIndex = -1;
 
@@ -61,6 +64,8 @@ private:
     void drawLegalMoves();
     void loadPieceTextures();
     void handleEvents();
+    void updateEngine();
+    bool applyMove(int fromRow, int fromCol, int toRow, int toCol);
     void draw();
     void drawPieces();
     void drawBoard();
