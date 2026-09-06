@@ -13,6 +13,9 @@ inline const int INF = 1e9, NEGINF = -1e9;
 class Board{
     friend struct BoardTestAccess;
 
+    static const int pawn_sq_table[64];
+    static const int knight_sq_table[64];
+    static const int king_sq_table[64];
     std::vector<std::vector<int>> current_board{8, std::vector<int> (8, 0)};
     std::vector<std::tuple<int, int, int, int, int, int, int>> rollback; //old old new new piece turn move_left
     std::unordered_map<int, int> piece_value;
