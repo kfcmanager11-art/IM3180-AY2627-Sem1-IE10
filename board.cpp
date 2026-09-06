@@ -3,12 +3,17 @@
 #include<iostream>
 #include<algorithm>
 #include<cmath>
+#include<stdexcept>
 
-Board::Board(){
+Board::Board(int engineSide){
+    if(engineSide < -1 || engineSide > 1) {
+        throw std::invalid_argument("engine_side must be -1, 0, or 1");
+    }
     this -> turn = 0;
     this -> move_left = 1;
     this -> game_status = 0;
     this -> board_hash = 0;
+    this -> engine_side = engineSide; // -1: two players, 0: engine White, 1: engine Black
 
     std::uniform_int_distribution<Hash> dist(0, UINT64_MAX);
     for(int i = -6; i <= 6; ++i){
@@ -126,6 +131,27 @@ bool Board::check_game_ended(){
     return false;
 }
 
+bool Board::has_game_ended() const { return game_status != 0; }
+
+bool Board::is_engine_turn() const {
+    return !has_game_ended() && engine_side == turn;
+}
+
+int Board::get_engine_side() const { return engine_side; }
+int Board::get_current_turn() const { return turn; }
+int Board::get_moves_left() const { return move_left; }
+
+const std::tuple<int, int, int, int>& Board::get_best_move() const {
+    return best_move;
+}
+
+bool Board::find_best_move(int search_depth) {
+    if(search_depth < 1) throw std::invalid_argument("search_depth must be positive");
+    best_move = {-1, -1, -1, -1};
+    negamax_search(0, search_depth, NEGINF, INF, &best_move);
+    return std::get<0>(best_move) != -1;
+}
+
 void Board::get_turn(){
     if(!turn){
         std::cout << "White turn\n";
@@ -135,6 +161,7 @@ void Board::get_turn(){
 }
 
 bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
+    if(has_game_ended()) return false;
     if(!inboard(new_x, new_y) || !inboard(old_x, old_y)) return false;
     
     int piece = current_board[old_x][old_y];
@@ -143,6 +170,7 @@ bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
     if(!turn && piece < 0) return false;
 
     int destination_piece = current_board[new_x][new_y];
+    if(destination_piece != 0 && move_left < 2) return false;
     
     if(destination_piece != 0 && (piece > 0) == (destination_piece > 0)) return false;
     
@@ -197,14 +225,14 @@ bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
     return false;
 }
 
-void Board::make_move(int old_x, int old_y, int new_x, int new_y){
-    if(check_game_ended()) return;
+bool Board::make_move(int old_x, int old_y, int new_x, int new_y){
+    if(has_game_ended()) return false;
     if(!valid_move(old_x, old_y, new_x, new_y)){
         std::cout << "Invalid move\n";
-        return;
+        return false;
     }
 
-    if(current_board[new_x][new_y]) { make_capture(old_x, old_y, new_x, new_y); return; }
+    if(current_board[new_x][new_y]) return make_capture(old_x, old_y, new_x, new_y);
 
     int piece = current_board[old_x][old_y];
     board_hash ^= piece_hash[piece * 64 + old_x * 8 + old_y];
@@ -224,15 +252,12 @@ void Board::make_move(int old_x, int old_y, int new_x, int new_y){
     board_hash ^= piece_hash[0 * 64 + new_x * 8 + new_y];
     board_hash ^= turn_hash[turn];
     board_hash ^= move_left_hash[move_left];
+    return true;
 }
 
-void Board::make_capture(int old_x, int old_y, int new_x, int new_y){
-    if(check_game_ended()) return;
-
-    if(move_left < 2) {
-        std::cout << "Insufficient move left";
-        return;
-    }
+bool Board::make_capture(int old_x, int old_y, int new_x, int new_y){
+    if(!valid_move(old_x, old_y, new_x, new_y)) return false;
+    if(current_board[new_x][new_y] == 0) return false;
 
     int piece = current_board[old_x][old_y], captured_piece = current_board[new_x][new_y];
 
@@ -254,6 +279,7 @@ void Board::make_capture(int old_x, int old_y, int new_x, int new_y){
     board_hash ^= piece_hash[piece * 64 + new_x * 8 + new_y];
     board_hash ^= turn_hash[turn];
     board_hash ^= move_left_hash[move_left];
+    return true;
 }
 
 static const int pawn_sq_table[64] = {
@@ -405,12 +431,23 @@ void Board::rollback_move(){
 }
 
 int Board::negamax(int move_remaining, int depth, int alpha, int beta){
-    ++search_nodes;
-    if(alpha >= beta) ++closed_window_nodes;
-    if(move_remaining == 2 && depth >= 30) return board_eval();
-    if(check_game_ended()) return board_eval();
+    if(move_remaining != move_left) {
+        throw std::invalid_argument("move_remaining must match the board's moves left");
+    }
+    best_move = {-1, -1, -1, -1};
+    return negamax_search(depth, 16, alpha, beta, &best_move);
+}
+
+int Board::negamax_search(int depth, int max_depth, int alpha, int beta,
+    std::tuple<int, int, int, int>* root_move){
+    // ++search_nodes;
+    // if(alpha >= beta) ++closed_window_nodes;
+    const int move_remaining = move_left;
+    if(move_remaining == 2 && depth >= max_depth) return board_eval();
+    if(has_game_ended()) return board_eval();
 
     int best_score = NEGINF;
+    bool found_move = false;
 
     for(auto& x: current_board){
         for(auto& y: x){
@@ -421,9 +458,13 @@ int Board::negamax(int move_remaining, int depth, int alpha, int beta){
                 if(valid_move(&x - &current_board[0], &y - &x[0], new_x, new_y)){
                     if(current_board[new_x][new_y] != 0) continue;
                     make_move(&x - &current_board[0], &y - &x[0], new_x, new_y);
-                    auto score = negamax(move_remaining == 1 ? 2 : 1, depth + (move_remaining == 1 ? 1 : 0), 
+                    auto score = negamax_search(depth + (move_remaining == 1 ? 1 : 0), max_depth,
                         move_remaining == 2 ? alpha : -beta, move_remaining == 2 ? beta : -alpha) * (move_remaining == 1 ? -1 : 1);
-                    best_score = std::max(best_score, score);
+                    if(!found_move || best_score < score) {
+                        best_score = score;
+                        if(root_move) *root_move = std::make_tuple(&x - &current_board[0], &y - &x[0], new_x, new_y);
+                    }
+                    found_move = true;
                     alpha = std::max(alpha, score);
                     rollback_move();
                     if(alpha >= beta) return best_score;
@@ -437,8 +478,12 @@ int Board::negamax(int move_remaining, int depth, int alpha, int beta){
                 if(valid_move(&x - &current_board[0], &y - &x[0], new_x, new_y)){
                     if(current_board[new_x][new_y] == 0) continue;
                     make_capture(&x - &current_board[0], &y - &x[0], new_x, new_y);
-                    auto score = -negamax(2, depth + 1, -beta, -alpha);
-                    best_score = std::max(best_score, score);
+                    auto score = -negamax_search(depth + 1, max_depth, -beta, -alpha);
+                    if(!found_move || best_score < score) {
+                        best_score = score;
+                        if(root_move) *root_move = std::make_tuple(&x - &current_board[0], &y - &x[0], new_x, new_y);
+                    }
+                    found_move = true;
                     alpha = std::max(alpha, score);
                     rollback_move();
                     if(alpha >= beta) return best_score;
