@@ -1,5 +1,6 @@
 #include "ui.hpp"
 #include <algorithm>
+#include <optional>
 
 ChessUI::ChessUI()
     : window(sf::VideoMode({1200, 800}), "Chess AI") {
@@ -160,7 +161,7 @@ void ChessUI::drawBoard() {
 void ChessUI::drawSidePanel() {
 
     sf::RectangleShape panel( sf::Vector2f( sidePanelWidth, sidePanelHeight ) );
-    panel.setPosition( sf::Vector2f( idePanelX, sidePanelY ) );
+    panel.setPosition( sf::Vector2f( sidePanelX, sidePanelY ) );
     panel.setFillColor( sf::Color(45, 45, 45) );
 
     window.draw(panel);

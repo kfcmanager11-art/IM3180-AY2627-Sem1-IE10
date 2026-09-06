@@ -2,6 +2,7 @@
 #include "../board.hpp"
 #include <SFML/Graphics.hpp>
 #include <map>
+#include <utility>
 #include <vector>
 
 
