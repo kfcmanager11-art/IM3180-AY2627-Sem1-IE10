@@ -1,8 +1,15 @@
 #include "ui.hpp"
 #include <algorithm>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
-ChessUI::ChessUI()
-    : window(sf::VideoMode({1200, 800}), "Chess AI") {
+ChessUI::ChessUI(int engineSide, int searchDepth)
+    : game(engineSide), window(sf::VideoMode({1200, 800}), "Chess AI"),
+      engineSearchDepth(searchDepth), startingBoard(game) {
+
+    if(searchDepth < 1) throw std::invalid_argument("searchDepth must be positive");
+    window.setFramerateLimit(60);
 
     font.openFromFile("assets/fonts/font.ttf");
 
@@ -12,8 +19,41 @@ ChessUI::ChessUI()
 void ChessUI::run() {
     while (window.isOpen()) {
         handleEvents();
+        if (!window.isOpen()) break;
         draw();
+        updateEngine();
     }
+}
+
+bool ChessUI::applyMove(int fromRow, int fromCol, int toRow, int toCol) {
+    if (!game.valid_move(fromRow, fromCol, toRow, toCol)) return false;
+
+    int movedPiece = (*(game.begin() + fromRow))[fromCol];
+    int capturedPiece = (*(game.begin() + toRow))[toCol];
+    if (!game.make_move(fromRow, fromCol, toRow, toCol)) return false;
+
+    // A move from an earlier position starts a new history branch.
+    moveHistory.erase(moveHistory.begin() + currentHistoryIndex + 1, moveHistory.end());
+    moveHistory.push_back({movedPiece, fromRow, fromCol, toRow, toCol, capturedPiece, game});
+    currentHistoryIndex = static_cast<int>(moveHistory.size()) - 1;
+    engineStalled = false;
+    legalMoves.clear();
+    return true;
+}
+
+void ChessUI::updateEngine() {
+    if (!game.is_engine_turn() || engineStalled) return;
+    // Browsing history should not immediately cause the engine to play a new branch.
+    if (currentHistoryIndex + 1 < static_cast<int>(moveHistory.size())) return;
+
+    if (!game.find_best_move(engineSearchDepth)) {
+        engineStalled = true;
+        return;
+    }
+
+    auto [fromRow, fromCol, toRow, toCol] = game.get_best_move();
+    if (!applyMove(fromRow, fromCol, toRow, toCol)) engineStalled = true;
+    // If a quiet move leaves one action, the next frame plays the engine's second move.
 }
 
 void ChessUI::handleEvents() {
@@ -56,10 +96,17 @@ void ChessUI::handleEvents() {
                     {
                         game = moveHistory[i].boardAfterMove;
                         currentHistoryIndex = i;
+                        engineStalled = false;
+                        dragging = false;
+                        legalMoves.clear();
                         clickedHistory = true;
                         break;
                     }
                 }
+
+                if (clickedHistory || game.is_engine_turn() || game.has_game_ended()) continue;
+                if (mouseX < boardX || mouseX >= boardX + boardSize ||
+                    mouseY < boardY || mouseY >= boardY + boardSize) continue;
 
                 int col = static_cast<int>((mouseX - boardX) / squareSize);
                 int row = static_cast<int>((mouseY - boardY) / squareSize);
@@ -67,7 +114,8 @@ void ChessUI::handleEvents() {
                 if (row >= 0 && row < 8 && col >= 0 && col < 8) {
                     auto boardRow = game.begin() + row;
 
-                    if ((*boardRow)[col] != 0) {
+                    int piece = (*boardRow)[col];
+                    if (piece != 0 && (piece < 0) == (game.get_current_turn() == 1)) {
                         dragging = true;
                         draggedRow = row;
                         draggedCol = col;
@@ -98,21 +146,10 @@ void ChessUI::handleEvents() {
             int newCol = static_cast<int>((mouseX - boardX) / squareSize);
             int newRow = static_cast<int>((mouseY - boardY) / squareSize);
 
-            if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8) {
-
-                if (game.valid_move( draggedRow, draggedCol, newRow, newCol)) {
-                    {
-                    auto oldRow = game.begin() + draggedRow;
-                    auto targetRow = game.begin() + newRow;
-                    int movedPiece = (*oldRow)[draggedCol];
-                    int capturedPiece = (*targetRow)[newCol];
-
-                    game.make_move( draggedRow, draggedCol, newRow, newCol );
-
-                    moveHistory.push_back({ movedPiece, draggedRow, draggedCol, newRow, newCol, capturedPiece, game });
-                    currentHistoryIndex = static_cast<int>(moveHistory.size()) - 1;
-                    }
-                }
+            if (!game.is_engine_turn() && !game.has_game_ended() &&
+                mouseX >= boardX && mouseX < boardX + boardSize &&
+                mouseY >= boardY && mouseY < boardY + boardSize) {
+                applyMove(draggedRow, draggedCol, newRow, newCol);
             }
 
             dragging = false;
@@ -168,6 +205,16 @@ void ChessUI::drawSidePanel() {
 
 
 void ChessUI::drawText() {
+
+    std::string mode = game.get_engine_side() == -1 ? "Two players" :
+        (game.get_engine_side() == 0 ? "Engine: White" : "Engine: Black");
+    std::string turnText = game.get_current_turn() == 0 ? "White" : "Black";
+    std::string status = game.has_game_ended() ? "Game ended" :
+        turnText + " to move (" + std::to_string(game.get_moves_left()) + " actions left)";
+    if (engineStalled) status = "Engine has no legal move";
+    sf::Text turnLabel(font, mode + " | " + status, 20);
+    turnLabel.setPosition({static_cast<float>(boardX), 35.f});
+    window.draw(turnLabel);
 
     sf::Text historyTitle(font, "MOVE HISTORY", 28);
     historyTitle.setPosition({sidePanelX + 20.f, sidePanelY + 20.f});

@@ -3,12 +3,17 @@
 #include<iostream>
 #include<algorithm>
 #include<cmath>
+#include<stdexcept>
 
-Board::Board(){
+Board::Board(int engineSide){
+    if(engineSide < -1 || engineSide > 1) {
+        throw std::invalid_argument("engine_side must be -1, 0, or 1");
+    }
     this -> turn = 0;
     this -> move_left = 1;
     this -> game_status = 0;
     this -> board_hash = 0;
+    this -> engine_side = engineSide; // -1: two players, 0: engine White, 1: engine Black
 
     std::uniform_int_distribution<Hash> dist(0, UINT64_MAX);
     for(int i = -6; i <= 6; ++i){
@@ -126,6 +131,27 @@ bool Board::check_game_ended(){
     return false;
 }
 
+bool Board::has_game_ended() const { return game_status != 0; }
+
+bool Board::is_engine_turn() const {
+    return !has_game_ended() && engine_side == turn;
+}
+
+int Board::get_engine_side() const { return engine_side; }
+int Board::get_current_turn() const { return turn; }
+int Board::get_moves_left() const { return move_left; }
+
+const std::tuple<int, int, int, int>& Board::get_best_move() const {
+    return best_move;
+}
+
+bool Board::find_best_move(int search_depth) {
+    if(search_depth < 1) throw std::invalid_argument("search_depth must be positive");
+    best_move = {-1, -1, -1, -1};
+    negamax_search(0, search_depth, NEGINF, INF, &best_move);
+    return std::get<0>(best_move) != -1;
+}
+
 void Board::get_turn(){
     if(!turn){
         std::cout << "White turn\n";
@@ -135,6 +161,7 @@ void Board::get_turn(){
 }
 
 bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
+    if(has_game_ended()) return false;
     if(!inboard(new_x, new_y) || !inboard(old_x, old_y)) return false;
     
     int piece = current_board[old_x][old_y];
@@ -143,6 +170,7 @@ bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
     if(!turn && piece < 0) return false;
 
     int destination_piece = current_board[new_x][new_y];
+    if(destination_piece != 0 && move_left < 2) return false;
     
     if(destination_piece != 0 && (piece > 0) == (destination_piece > 0)) return false;
     
@@ -197,14 +225,14 @@ bool Board::valid_move(int old_x, int old_y, int new_x, int new_y){
     return false;
 }
 
-void Board::make_move(int old_x, int old_y, int new_x, int new_y){
-    if(check_game_ended()) return;
+bool Board::make_move(int old_x, int old_y, int new_x, int new_y){
+    if(has_game_ended()) return false;
     if(!valid_move(old_x, old_y, new_x, new_y)){
         std::cout << "Invalid move\n";
-        return;
+        return false;
     }
 
-    if(current_board[new_x][new_y]) { make_capture(old_x, old_y, new_x, new_y); return; }
+    if(current_board[new_x][new_y]) return make_capture(old_x, old_y, new_x, new_y);
 
     int piece = current_board[old_x][old_y];
     board_hash ^= piece_hash[piece * 64 + old_x * 8 + old_y];
@@ -224,15 +252,12 @@ void Board::make_move(int old_x, int old_y, int new_x, int new_y){
     board_hash ^= piece_hash[0 * 64 + new_x * 8 + new_y];
     board_hash ^= turn_hash[turn];
     board_hash ^= move_left_hash[move_left];
+    return true;
 }
 
-void Board::make_capture(int old_x, int old_y, int new_x, int new_y){
-    if(check_game_ended()) return;
-
-    if(move_left < 2) {
-        std::cout << "Insufficient move left";
-        return;
-    }
+bool Board::make_capture(int old_x, int old_y, int new_x, int new_y){
+    if(!valid_move(old_x, old_y, new_x, new_y)) return false;
+    if(current_board[new_x][new_y] == 0) return false;
 
     int piece = current_board[old_x][old_y], captured_piece = current_board[new_x][new_y];
 
@@ -254,16 +279,223 @@ void Board::make_capture(int old_x, int old_y, int new_x, int new_y){
     board_hash ^= piece_hash[piece * 64 + new_x * 8 + new_y];
     board_hash ^= turn_hash[turn];
     board_hash ^= move_left_hash[move_left];
+    return true;
 }
 
-int Board::board_eval(){
-    int val = 0;
-    for(auto& i: current_board){
-        for(auto& j: i){
-            val += piece_value[j];
+const int Board::pawn_sq_table[64] = {
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5, 10, 10,-20,-20, 10, 10,  5,
+     5, -5,-10,  0,  0,-10, -5,  5,
+     0,  0,  0, 20, 20,  0,  0,  0,
+     5,  5, 10, 25, 25, 10,  5,  5,
+    10, 10, 20, 30, 30, 20, 10, 10,
+    50, 50, 50, 50, 50, 50, 50, 50,
+     0,  0,  0,  0,  0,  0,  0,  0
+};
+
+const int Board::knight_sq_table[64] = {
+   -50,-40,-30,-30,-30,-30,-40,-50,
+   -40,-20,  0,  5,  5,  0,-20,-40,
+   -30,  5, 10, 15, 15, 10,  5,-30,
+   -30,  0, 15, 20, 20, 15,  0,-30,
+   -30,  5, 15, 20, 20, 15,  5,-30,
+   -30,  0, 10, 15, 15, 10,  0,-30,
+   -40,-20,  0,  0,  0,  0,-20,-40,
+   -50,-40,-30,-30,-30,-30,-40,-50
+};
+
+const int Board::king_sq_table[64] = {
+    20, 30, 10,  0,  0, 10, 30, 20,
+    20, 20,  0,  0,  0,  0, 20, 20,
+   -10,-20,-20,-20,-20,-20,-20,-10,
+   -20,-30,-30,-40,-40,-30,-30,-20,
+   -30,-40,-40,-50,-50,-40,-40,-30,
+   -30,-40,-40,-50,-50,-40,-40,-30,
+   -30,-40,-40,-50,-50,-40,-40,-30,
+   -30,-40,-40,-50,-50,-40,-40,-30
+};
+
+int Board::board_eval() {
+
+    if (game_status != 0) {
+        int winner_score = (game_status > 0) ? 999999 : -999999;
+        return winner_score * (turn ? -1 : 1);
+    }
+
+    int raw_score = 0;
+    int pawn_count_white[8] = {0};
+    int pawn_count_black[8] = {0};
+
+    int white_king_x = -1, white_king_y = -1;
+    int black_king_x = -1, black_king_y = -1;
+
+    std::vector<std::pair<int, int>> white_rooks;
+    std::vector<std::pair<int, int>> black_rooks;
+    const int passed_pawn_bonus[8] = {0, 5, 15, 30, 60, 100, 160, 0};
+
+    auto is_on_board = [](int r, int c) {
+        return r >= 0 && r < 8 && c >= 0 && c < 8;
+    };
+
+    for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < 8; c++) {
+            int piece = current_board[r][c];
+            if (piece == 0) continue;
+
+            int abs_p = std::abs(piece);
+            int mat = piece_value[abs_p];
+            int pst = 0;
+    
+            int sq_idx = (piece > 0) ? (r * 8 + c) : ((7 - r) * 8 + c); 
+
+            switch (abs_p) {
+                case 1: {
+                    pst = pawn_sq_table[sq_idx];
+                    if (piece > 0) pawn_count_white[c]++;
+                    else pawn_count_black[c]++;
+
+                    bool is_passed = true;
+                    int forward_dir = (piece > 0) ? 1 : -1;
+                    for (int check_r = r + forward_dir; check_r >= 0 && check_r < 8; check_r += forward_dir) {
+                        for (int check_c = c - 1; check_c <= c + 1; ++check_c) {
+                            if (is_on_board(check_r, check_c)) {
+                                int enemy_pawn = (piece > 0) ? -1 : 1;
+                                if (current_board[check_r][check_c] == enemy_pawn) {
+                                    is_passed = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!is_passed) break;
+                    }
+                    if (is_passed) {
+                        int rank_idx = (piece > 0) ? r : (7 - r);
+                        raw_score += (piece > 0 ? 1 : -1) * passed_pawn_bonus[rank_idx];
+                    }
+                    break;
+                }    
+                case 2: {
+                    pst = knight_sq_table[sq_idx];
+
+                    int mobility = 0;
+                    const int knight_moves[8][2] = {
+                        {-2,-1}, {-2,1}, {-1,-2}, {-1,2},
+                        { 1,-2}, { 1,2}, { 2,-1}, { 2,1}
+                    };
+                    for (auto& m : knight_moves) {
+                        int nr = r + m[0], nc = c + m[1];
+                        if (is_on_board(nr, nc)) {
+                            int dest = current_board[nr][nc];
+                            if (dest == 0 || (dest > 0) != (piece > 0)) mobility++;
+                        }
+                    }
+                    raw_score += (piece > 0 ? 1 : -1) * (mobility * 4);
+                    break;
+                }
+                case 3: {
+                    int mobility = 0;
+                    const int bishop_dirs[4][2] = {{-1,-1}, {-1,1}, {1,-1}, {1,1}};
+                    for (auto& d : bishop_dirs) {
+                        int nr = r + d[0], nc = c + d[1];
+                        while (is_on_board(nr, nc)) {
+                            int dest = current_board[nr][nc];
+                            if (dest == 0) {
+                                mobility++;
+                            } else {
+                                if ((dest > 0) != (piece > 0)) mobility++;
+                                break;
+                            }
+                            nr += d[0]; nc += d[1];
+                        }
+                    }
+                    raw_score += (piece > 0 ? 1 : -1) * (mobility * 3);
+                    break;
+                }
+                case 4:
+                    if (piece > 0) white_rooks.push_back({r, c});
+                    else black_rooks.push_back({r, c});
+                    break;
+                case 6: 
+                    pst = king_sq_table[sq_idx];
+                    if (piece > 0) { white_king_x = r; white_king_y = c; }
+                    else { black_king_x = r; black_king_y = c; }
+                    break;
+                default:
+                    break;
+            }
+
+            int total_piece_val = (piece > 0) ? (mat * 100 + pst) : -(mat * 100 + pst);
+            raw_score += total_piece_val;
         }
     }
-    return val * (turn ? -1 : 1);
+
+    for (int c = 0; c < 8; ++c) {
+        if (pawn_count_white[c] > 1) {
+            raw_score -= (pawn_count_white[c] - 1) * 20; 
+        }
+        if (pawn_count_white[c] > 0) {
+            bool left = (c > 0) && (pawn_count_white[c - 1] > 0);
+            bool right = (c < 7) && (pawn_count_white[c + 1] > 0);
+            if (!left && !right) raw_score -= 15; 
+        }
+
+        if (pawn_count_black[c] > 1) {
+            raw_score += (pawn_count_black[c] - 1) * 20;
+        }
+        if (pawn_count_black[c] > 0) {
+            bool left = (c > 0) && (pawn_count_black[c - 1] > 0);
+            bool right = (c < 7) && (pawn_count_black[c + 1] > 0);
+            if (!left && !right) raw_score += 15;
+        }
+    }
+
+    auto eval_rook_connection = [&](const std::vector<std::pair<int, int>>& rooks) {
+        if (rooks.size() < 2) return 0;
+        int connection_score = 0;
+        for (size_t i = 0; i < rooks.size(); ++i) {
+            for (size_t j = i + 1; j < rooks.size(); ++j) {
+                int r1 = rooks[i].first, c1 = rooks[i].second;
+                int r2 = rooks[j].first, c2 = rooks[j].second;
+                if (r1 == r2) {
+                    bool blocked = false;
+                    for (int col = std::min(c1, c2) + 1; col < std::max(c1, c2); ++col)
+                        if (current_board[r1][col] != 0) { blocked = true; break; }
+                    if (!blocked) connection_score += 25;
+                } else if (c1 == c2) {
+                    bool blocked = false;
+                    for (int row = std::min(r1, r2) + 1; row < std::max(r1, r2); ++row)
+                        if (current_board[row][c1] != 0) { blocked = true; break; }
+                    if (!blocked) connection_score += 25;
+                }
+            }
+        }
+        return connection_score;
+    };
+    raw_score += eval_rook_connection(white_rooks);
+    raw_score -= eval_rook_connection(black_rooks);
+
+    auto eval_shield = [&](int k_x, int k_y, int p_type) {
+        if (k_x == -1) return 0;
+        int shield_score = 0;
+        int forward_row = k_x + (p_type > 0 ? 1 : -1);
+
+        if (forward_row >= 0 && forward_row < 8) {
+            for (int dc = -1; dc <= 1; ++dc) {
+                int sc = k_y + dc;
+                if (sc >= 0 && sc < 8) {
+                    if (current_board[forward_row][sc] == p_type) {
+                        shield_score += 25; 
+                    }
+                }
+            }
+        }
+        return shield_score;
+    };
+
+    raw_score += eval_shield(white_king_x, white_king_y, 1);
+    raw_score -= eval_shield(black_king_x, black_king_y, -1);
+
+    return raw_score * (turn ? -1 : 1);
 }
 
 void Board::rollback_move(){
@@ -289,12 +521,23 @@ void Board::rollback_move(){
 }
 
 int Board::negamax(int move_remaining, int depth, int alpha, int beta){
-    ++search_nodes;
-    if(alpha >= beta) ++closed_window_nodes;
-    if(move_remaining == 2 && depth >= 30) return board_eval();
-    if(check_game_ended()) return board_eval();
+    if(move_remaining != move_left) {
+        throw std::invalid_argument("move_remaining must match the board's moves left");
+    }
+    best_move = {-1, -1, -1, -1};
+    return negamax_search(depth, 16, alpha, beta, &best_move);
+}
+
+int Board::negamax_search(int depth, int max_depth, int alpha, int beta,
+    std::tuple<int, int, int, int>* root_move){
+    // ++search_nodes;
+    // if(alpha >= beta) ++closed_window_nodes;
+    const int move_remaining = move_left;
+    if(move_remaining == 2 && depth >= max_depth) return board_eval();
+    if(has_game_ended()) return board_eval();
 
     int best_score = NEGINF;
+    bool found_move = false;
 
     for(auto& x: current_board){
         for(auto& y: x){
@@ -305,9 +548,13 @@ int Board::negamax(int move_remaining, int depth, int alpha, int beta){
                 if(valid_move(&x - &current_board[0], &y - &x[0], new_x, new_y)){
                     if(current_board[new_x][new_y] != 0) continue;
                     make_move(&x - &current_board[0], &y - &x[0], new_x, new_y);
-                    auto score = negamax(move_remaining == 1 ? 2 : 1, depth + (move_remaining == 1 ? 1 : 0), 
+                    auto score = negamax_search(depth + (move_remaining == 1 ? 1 : 0), max_depth,
                         move_remaining == 2 ? alpha : -beta, move_remaining == 2 ? beta : -alpha) * (move_remaining == 1 ? -1 : 1);
-                    best_score = std::max(best_score, score);
+                    if(!found_move || best_score < score) {
+                        best_score = score;
+                        if(root_move) *root_move = std::make_tuple(&x - &current_board[0], &y - &x[0], new_x, new_y);
+                    }
+                    found_move = true;
                     alpha = std::max(alpha, score);
                     rollback_move();
                     if(alpha >= beta) return best_score;
@@ -321,8 +568,12 @@ int Board::negamax(int move_remaining, int depth, int alpha, int beta){
                 if(valid_move(&x - &current_board[0], &y - &x[0], new_x, new_y)){
                     if(current_board[new_x][new_y] == 0) continue;
                     make_capture(&x - &current_board[0], &y - &x[0], new_x, new_y);
-                    auto score = -negamax(2, depth + 1, -beta, -alpha);
-                    best_score = std::max(best_score, score);
+                    auto score = -negamax_search(depth + 1, max_depth, -beta, -alpha);
+                    if(!found_move || best_score < score) {
+                        best_score = score;
+                        if(root_move) *root_move = std::make_tuple(&x - &current_board[0], &y - &x[0], new_x, new_y);
+                    }
+                    found_move = true;
                     alpha = std::max(alpha, score);
                     rollback_move();
                     if(alpha >= beta) return best_score;
