@@ -71,7 +71,7 @@ void ChessUI::handleEvents() {
                         dragging = true;
                         draggedRow = row;
                         draggedCol = col;
-                        mousePosition = { mouseX, mouseY};
+                        mousePosition = {mouseX, mouseY};
                         legalMoves.clear();
 
                         for (int newRow = 0; newRow < 8; newRow++) {
@@ -160,7 +160,7 @@ void ChessUI::drawBoard() {
 void ChessUI::drawSidePanel() {
 
     sf::RectangleShape panel( sf::Vector2f( sidePanelWidth, sidePanelHeight ) );
-    panel.setPosition( sf::Vector2f( idePanelX, sidePanelY ) );
+    panel.setPosition( sf::Vector2f( sidePanelX, sidePanelY ) );
     panel.setFillColor( sf::Color(45, 45, 45) );
 
     window.draw(panel);
