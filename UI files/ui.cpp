@@ -46,6 +46,9 @@ void ChessUI::updateEngine() {
     // Browsing history should not immediately cause the engine to play a new branch.
     if (currentHistoryIndex + 1 < static_cast<int>(moveHistory.size())) return;
 
+    static sf::Clock moveTimer; 
+    if (moveTimer.getElapsedTime().asMilliseconds() < 300) return; 
+
     if (!game.find_best_move(engineSearchDepth)) {
         engineStalled = true;
         return;
@@ -54,11 +57,34 @@ void ChessUI::updateEngine() {
     auto [fromRow, fromCol, toRow, toCol] = game.get_best_move();
     if (!applyMove(fromRow, fromCol, toRow, toCol)) engineStalled = true;
     // If a quiet move leaves one action, the next frame plays the engine's second move.
+
+    moveTimer.restart();
 }
 
 void ChessUI::handleEvents() {
 
     while (const std::optional event = window.pollEvent()) {
+        if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) { // ADDED
+            if (keyPressed->code == sf::Keyboard::Key::Num1) { // ADDED
+                game = Board(-1); // Human vs Human // ADDED
+                moveHistory.clear(); // ADDED
+                currentHistoryIndex = -1; // ADDED
+                engineStalled = false; // ADDED
+            } // ADDED
+            else if (keyPressed->code == sf::Keyboard::Key::Num2) { // ADDED
+                game = Board(1);  // Human vs Engine (Black) // ADDED
+                moveHistory.clear(); // ADDED
+                currentHistoryIndex = -1; // ADDED
+                engineStalled = false; // ADDED
+            } // ADDED
+            else if (keyPressed->code == sf::Keyboard::Key::Num3) { // ADDED
+                game = Board(2);  // Engine vs Engine // ADDED
+                moveHistory.clear(); // ADDED
+                currentHistoryIndex = -1; // ADDED
+                engineStalled = false; // ADDED
+            } // ADDED
+        }
+
         if (const auto* wheel = event->getIf<sf::Event::MouseWheelScrolled>()) 
         {
             float mouseX = static_cast<float>(wheel->position.x);
@@ -206,8 +232,13 @@ void ChessUI::drawSidePanel() {
 
 void ChessUI::drawText() {
 
-    std::string mode = game.get_engine_side() == -1 ? "Two players" :
-        (game.get_engine_side() == 0 ? "Engine: White" : "Engine: Black");
+    std::string mode; // ADDED
+    switch (game.get_engine_side()) { // ADDED
+        case 0:  mode = "Engine: White"; break; // ADDED
+        case 1:  mode = "Engine: Black"; break; // ADDED
+        case 2:  mode = "Engine vs Engine"; break; // ADDED
+        default: mode = "Two players"; break; // ADDED
+    }
     std::string turnText = game.get_current_turn() == 0 ? "White" : "Black";
     std::string status = game.has_game_ended() ? "Game ended" :
         turnText + " to move (" + std::to_string(game.get_moves_left()) + " actions left)";

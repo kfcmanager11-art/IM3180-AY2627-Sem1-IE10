@@ -6,8 +6,8 @@
 #include<stdexcept>
 
 Board::Board(int engineSide){
-    if(engineSide < -1 || engineSide > 1) {
-        throw std::invalid_argument("engine_side must be -1, 0, or 1");
+    if(engineSide < -1 || engineSide > 2) {
+        throw std::invalid_argument("engine_side must be -1, 0, 1 or 2");
     }
     this -> turn = 0;
     this -> move_left = 1;
@@ -134,7 +134,8 @@ bool Board::check_game_ended(){
 bool Board::has_game_ended() const { return game_status != 0; }
 
 bool Board::is_engine_turn() const {
-    return !has_game_ended() && engine_side == turn;
+    if (has_game_ended()) return false;
+    return engine_side == 2 || engine_side == turn;
 }
 
 int Board::get_engine_side() const { return engine_side; }
