@@ -1,6 +1,7 @@
 #pragma once
 #include "../board.hpp"
 #include <SFML/Graphics.hpp>
+#include "engine.hpp"
 #include <map>
 #include <utility>
 #include <vector>
@@ -24,11 +25,13 @@ class ChessUI {
 
 
 public:
-    explicit ChessUI(int engineSide = 0, int searchDepth = 2);
+    explicit ChessUI(int engineSide = 2, int searchDepth = 2);
     void run();
 
 private:
     Board game;
+    Engine engine;
+    int engineSide;
     sf::RenderWindow window;
     sf::Font font;
     std::map<int, sf::Texture> pieceTextures;

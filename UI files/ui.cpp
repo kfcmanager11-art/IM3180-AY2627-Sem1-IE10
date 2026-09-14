@@ -5,7 +5,7 @@
 #include <string>
 
 ChessUI::ChessUI(int engineSide, int searchDepth)
-    : game(engineSide), window(sf::VideoMode({1200, 800}), "Chess AI"),
+    : game(), engineSide(engineSide), window(sf::VideoMode({1200, 800}), "Chess AI"),
       engineSearchDepth(searchDepth), startingBoard(game) {
 
     if(searchDepth < 1) throw std::invalid_argument("searchDepth must be positive");
@@ -14,6 +14,11 @@ ChessUI::ChessUI(int engineSide, int searchDepth)
     font.openFromFile("assets/fonts/font.ttf");
 
     loadPieceTextures();
+}
+
+bool ChessUI::isEngineTurn() const {
+    if (game.has_game_ended()) return false;
+    return engineSide == 2 || engineSide == game.get_current_turn();
 }
 
 void ChessUI::run() {
@@ -42,21 +47,21 @@ bool ChessUI::applyMove(int fromRow, int fromCol, int toRow, int toCol) {
 }
 
 void ChessUI::updateEngine() {
-    if (!game.is_engine_turn() || engineStalled) return;
+    if (!isEngineTurn() || engineStalled) return;
     // Browsing history should not immediately cause the engine to play a new branch.
     if (currentHistoryIndex + 1 < static_cast<int>(moveHistory.size())) return;
 
     static sf::Clock moveTimer; 
     if (moveTimer.getElapsedTime().asMilliseconds() < 300) return; 
 
-    if (!game.find_best_move(engineSearchDepth)) {
+    std::tuple<int, int, int, int> bestMove;
+    if (!engine.find_best_move(game, engineSearchDepth, bestMove)) {
         engineStalled = true;
         return;
     }
 
-    auto [fromRow, fromCol, toRow, toCol] = game.get_best_move();
+    auto [fromRow, fromCol, toRow, toCol] = bestMove;
     if (!applyMove(fromRow, fromCol, toRow, toCol)) engineStalled = true;
-    // If a quiet move leaves one action, the next frame plays the engine's second move.
 
     moveTimer.restart();
 }
@@ -64,25 +69,28 @@ void ChessUI::updateEngine() {
 void ChessUI::handleEvents() {
 
     while (const std::optional event = window.pollEvent()) {
-        if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) { // ADDED
-            if (keyPressed->code == sf::Keyboard::Key::Num1) { // ADDED
-                game = Board(-1); // Human vs Human // ADDED
-                moveHistory.clear(); // ADDED
-                currentHistoryIndex = -1; // ADDED
-                engineStalled = false; // ADDED
-            } // ADDED
-            else if (keyPressed->code == sf::Keyboard::Key::Num2) { // ADDED
-                game = Board(1);  // Human vs Engine (Black) // ADDED
-                moveHistory.clear(); // ADDED
-                currentHistoryIndex = -1; // ADDED
-                engineStalled = false; // ADDED
-            } // ADDED
-            else if (keyPressed->code == sf::Keyboard::Key::Num3) { // ADDED
-                game = Board(2);  // Engine vs Engine // ADDED
-                moveHistory.clear(); // ADDED
-                currentHistoryIndex = -1; // ADDED
-                engineStalled = false; // ADDED
-            } // ADDED
+        if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) {
+            if (keyPressed->code == sf::Keyboard::Key::Num1) {
+                game = Board();
+                engineSide = -1; // Human vs Human
+                moveHistory.clear();
+                currentHistoryIndex = -1;
+                engineStalled = false;
+            }
+            else if (keyPressed->code == sf::Keyboard::Key::Num2) {
+                game = Board();
+                engineSide = 1;  // Human vs Engine (Black)
+                moveHistory.clear();
+                currentHistoryIndex = -1;
+                engineStalled = false;
+            }
+            else if (keyPressed->code == sf::Keyboard::Key::Num3) {
+                game = Board();
+                engineSide = 2;  // Engine vs Engine
+                moveHistory.clear();
+                currentHistoryIndex = -1;
+                engineStalled = false;
+            }
         }
 
         if (const auto* wheel = event->getIf<sf::Event::MouseWheelScrolled>()) 
@@ -130,7 +138,7 @@ void ChessUI::handleEvents() {
                     }
                 }
 
-                if (clickedHistory || game.is_engine_turn() || game.has_game_ended()) continue;
+                if (clickedHistory || isEngineTurn() || game.has_game_ended()) continue;
                 if (mouseX < boardX || mouseX >= boardX + boardSize ||
                     mouseY < boardY || mouseY >= boardY + boardSize) continue;
 
@@ -150,10 +158,10 @@ void ChessUI::handleEvents() {
 
                         for (int newRow = 0; newRow < 8; newRow++) {
                             for (int newCol = 0; newCol < 8; newCol++) {
-                                if (game.valid_move( draggedRow, draggedCol, newRow, newCol)) {
+                                if (game.valid_move(draggedRow, draggedCol, newRow, newCol)) {
                                     legalMoves.push_back({newRow, newCol});
-                                    }
-                             }
+                                }
+                            }
                         }
                     }
                 }
@@ -172,7 +180,7 @@ void ChessUI::handleEvents() {
             int newCol = static_cast<int>((mouseX - boardX) / squareSize);
             int newRow = static_cast<int>((mouseY - boardY) / squareSize);
 
-            if (!game.is_engine_turn() && !game.has_game_ended() &&
+            if (!isEngineTurn() && !game.has_game_ended() &&
                 mouseX >= boardX && mouseX < boardX + boardSize &&
                 mouseY >= boardY && mouseY < boardY + boardSize) {
                 applyMove(draggedRow, draggedCol, newRow, newCol);
@@ -184,7 +192,6 @@ void ChessUI::handleEvents() {
             legalMoves.clear();
         }
     }
-    
 }
 
 void ChessUI::draw() {
@@ -229,15 +236,14 @@ void ChessUI::drawSidePanel() {
     window.draw(panel);
 }
 
-
 void ChessUI::drawText() {
 
-    std::string mode; // ADDED
-    switch (game.get_engine_side()) { // ADDED
-        case 0:  mode = "Engine: White"; break; // ADDED
-        case 1:  mode = "Engine: Black"; break; // ADDED
-        case 2:  mode = "Engine vs Engine"; break; // ADDED
-        default: mode = "Two players"; break; // ADDED
+    std::string mode;
+    switch (engineSide) {
+        case 0:  mode = "Engine: White"; break;
+        case 1:  mode = "Engine: Black"; break;
+        case 2:  mode = "Engine vs Engine"; break;
+        default: mode = "Two players"; break;
     }
     std::string turnText = game.get_current_turn() == 0 ? "White" : "Black";
     std::string status = game.has_game_ended() ? "Game ended" :
@@ -286,22 +292,14 @@ void ChessUI::drawPieces() {
         row++;
     }
 
-
-    
     if (dragging && draggedPiece != 0) {
 
         sf::Sprite sprite(pieceTextures[draggedPiece]);
 
-        auto textureSize =
-            pieceTextures[draggedPiece].getSize();
+        auto textureSize = pieceTextures[draggedPiece].getSize();
+        float maxSize = static_cast<float>( std::max(textureSize.x, textureSize.y) );
 
-        float maxSize = static_cast<float>(
-            std::max(textureSize.x, textureSize.y)
-        );
-
-        
         float scale = 120.f / maxSize;
-
         sprite.setScale({scale, scale});
 
         float width = textureSize.x * scale;
@@ -315,6 +313,7 @@ void ChessUI::drawPieces() {
         window.draw(sprite);
     }
 }
+
 void ChessUI::loadPieceTextures() {
     pieceTextures[1].loadFromFile("assets/pieces/white_pawn.png");
     pieceTextures[2].loadFromFile("assets/pieces/white_knight.png");
@@ -376,9 +375,7 @@ void ChessUI::drawMoveHistory() {
         sf::Sprite sprite(pieceTextures[piece]);
 
         auto textureSize = pieceTextures[piece].getSize();
-
         float maxSize = static_cast<float>( std::max(textureSize.x, textureSize.y) );
-
         float scale = iconSize / maxSize;
 
         sprite.setScale({scale, scale});
@@ -422,7 +419,6 @@ void ChessUI::drawHistoryPreview() {
     const MoveHistoryEntry& move = moveHistory[hoveredMove];
     const float ghostSize = 64.f;
 
-
     {
         sf::Sprite sprite(pieceTextures[move.piece]);
 
@@ -436,11 +432,9 @@ void ChessUI::drawHistoryPreview() {
         float height = textureSize.y * scale;
 
         float x = boardX + move.fromCol * squareSize + (squareSize - width) / 2.f;
-
         float y = boardY + move.fromRow * squareSize + (squareSize - height) / 2.f;
 
         sprite.setPosition({x, y});
-
         sprite.setColor( sf::Color(255, 255, 255, 90));
         window.draw(sprite);
     }
@@ -448,17 +442,10 @@ void ChessUI::drawHistoryPreview() {
     // FADED CAPTURED PIECE ON DESTINATION
     if (move.capturedPiece != 0) {
 
-        sf::Sprite sprite(
-            pieceTextures[move.capturedPiece]
-        );
+        sf::Sprite sprite(pieceTextures[move.capturedPiece]);
 
-        auto textureSize =
-            pieceTextures[move.capturedPiece].getSize();
-
-        float maxSize = static_cast<float>(
-            std::max(textureSize.x, textureSize.y)
-        );
-
+        auto textureSize = pieceTextures[move.capturedPiece].getSize();
+        float maxSize = static_cast<float>( std::max(textureSize.x, textureSize.y) );
         float scale = ghostSize / maxSize;
 
         sprite.setScale({scale, scale});
@@ -466,21 +453,11 @@ void ChessUI::drawHistoryPreview() {
         float width = textureSize.x * scale;
         float height = textureSize.y * scale;
 
-        float x =
-            boardX +
-            move.toCol * squareSize +
-            (squareSize - width) / 2.f;
-
-        float y =
-            boardY +
-            move.toRow * squareSize +
-            (squareSize - height) / 2.f;
+        float x = boardX + move.toCol * squareSize + (squareSize - width) / 2.f;
+        float y = boardY + move.toRow * squareSize + (squareSize - height) / 2.f;
 
         sprite.setPosition({x, y});
-
-        sprite.setColor(
-            sf::Color(255, 255, 255, 90)
-        );
+        sprite.setColor( sf::Color(255, 255, 255, 90) );
 
         window.draw(sprite);
     }
