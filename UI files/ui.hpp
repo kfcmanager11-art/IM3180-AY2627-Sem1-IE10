@@ -1,8 +1,10 @@
 #pragma once
 #include "../board.hpp"
+#include "../engine.hpp"
 #include <SFML/Graphics.hpp>
 #include <SFML/Audio.hpp>
 #include <map>
+#include <memory>
 #include <utility>
 #include <vector>
 #include <string>
@@ -25,11 +27,18 @@ struct MoveHistoryEntry {
 class ChessUI {
 
 public:
-    explicit ChessUI(int engineSide = 0, int searchDepth = 2);
+    explicit ChessUI(
+        int engineSide = 0,
+        int searchDepth = 2,
+        std::unique_ptr<Evaluator> whiteEvaluator = nullptr,
+        std::unique_ptr<Evaluator> blackEvaluator = nullptr
+    );
     void run();
 
 private:
     Board game;
+    Engine whiteEngine;
+    Engine blackEngine;
     sf::RenderWindow window;
 
     enum class Screen {StartScreen, MainMenu, ChooseSide, Game, Settings, EndGame};
@@ -102,6 +111,7 @@ private:
     int draggedRow = -1;
     int draggedCol = -1;
     int engineSearchDepth;
+    int configuredEngineSide = -1;
     bool engineStalled = false;
     Board startingBoard;
     int currentHistoryIndex = -1;
@@ -167,5 +177,6 @@ private:
     void selectPiece(int row, int col);
     void clearSelection();
     void startGame(int engineSide, GameMode mode);
+    Engine& engineForTurn();
     void playSound(const sf::SoundBuffer& buffer);
 };

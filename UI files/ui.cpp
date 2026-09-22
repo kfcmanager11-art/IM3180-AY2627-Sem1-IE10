@@ -7,10 +7,17 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
-ChessUI::ChessUI(int engineSide, int searchDepth)
-    : game(engineSide), window(sf::VideoMode({1200, 800}), "Chess AI"),
-      engineSearchDepth(searchDepth), startingBoard(game) {
+ChessUI::ChessUI(int engineSide, int searchDepth,
+                 std::unique_ptr<Evaluator> whiteEvaluator,
+                 std::unique_ptr<Evaluator> blackEvaluator)
+    : game(),
+      whiteEngine(0, searchDepth, std::move(whiteEvaluator)),
+      blackEngine(1, searchDepth, std::move(blackEvaluator)),
+      window(sf::VideoMode({1200, 800}), "Chess AI"),
+      engineSearchDepth(searchDepth), configuredEngineSide(engineSide),
+      startingBoard(game) {
     if(searchDepth < 1) throw std::invalid_argument("searchDepth must be positive");
     window.setFramerateLimit(60);
 
@@ -95,7 +102,7 @@ void ChessUI::updateEngine() {
         return;
 
     if (gameMode == GameMode::PlayerVsEngine) {
-        if (!game.is_engine_turn())
+        if (game.get_current_turn() != configuredEngineSide)
             return;
     }
 
@@ -112,13 +119,13 @@ void ChessUI::updateEngine() {
         return;
     }
 
-    if (!game.find_best_move(engineSearchDepth)) {
+    Engine& engine = engineForTurn();
+    if (!engine.find_best_move(game, engineSearchDepth)) {
         engineStalled = true;
         return;
     }
 
-    auto [fromRow, fromCol, toRow, toCol] =
-        game.get_best_move();
+    auto [fromRow, fromCol, toRow, toCol] = engine.get_best_move();
 
     if (!applyMove(
             fromRow,
@@ -380,7 +387,7 @@ void ChessUI::handleEvents() {
                         mouseX >= 300.f && mouseX <= 490.f &&
                         mouseY >= 650.f && mouseY <= 710.f) {
                         playSound(uiClickSoundBuffer);
-                        int engineSide = game.get_engine_side();
+                        int engineSide = configuredEngineSide;
                         GameMode mode = gameMode;
                         startGame(engineSide, mode);
                         continue;
@@ -408,7 +415,7 @@ void ChessUI::handleEvents() {
                     if (mouseX >= 390.f && mouseX <= 590.f &&
                         mouseY >= 500.f && mouseY <= 565.f) {
                         playSound(uiClickSoundBuffer);
-                        int engineSide = game.get_engine_side();
+                        int engineSide = configuredEngineSide;
                         GameMode mode = gameMode;
                         startGame(engineSide, mode);
                         continue;
@@ -492,11 +499,10 @@ void ChessUI::handleEvents() {
                     }
                 }
 
-                if (clickedHistory ||
-                    historyPaused ||
-                    gameMode == GameMode::EngineVsEngine ||
-                    game.is_engine_turn() ||
-                    game.has_game_ended()) continue;
+                bool engineTurn = gameMode == GameMode::EngineVsEngine ||
+                    (gameMode == GameMode::PlayerVsEngine &&
+                     game.get_current_turn() == configuredEngineSide);
+                if (clickedHistory || historyPaused || engineTurn || game.has_game_ended()) continue;
 
                 if (mouseX < boardX || mouseX >= boardX + boardSize ||
                     mouseY < boardY || mouseY >= boardY + boardSize) continue;
@@ -579,8 +585,10 @@ void ChessUI::handleEvents() {
             int newCol = isBoardFlipped() ? 7 - shownCol : shownCol;
             int newRow = isBoardFlipped() ? 7 - shownRow : shownRow;
 
-            if (gameMode != GameMode::EngineVsEngine &&
-                !game.is_engine_turn() && !game.has_game_ended() &&
+            bool engineTurn = gameMode == GameMode::EngineVsEngine ||
+                (gameMode == GameMode::PlayerVsEngine &&
+                 game.get_current_turn() == configuredEngineSide);
+            if (!engineTurn && !game.has_game_ended() &&
                 mouseX >= boardX && mouseX < boardX + boardSize &&
                 mouseY >= boardY && mouseY < boardY + boardSize) {
                 applyMove(draggedRow, draggedCol, newRow, newCol);
@@ -868,7 +876,7 @@ void ChessUI::drawChooseSide() {
 bool ChessUI::isBoardFlipped() const {
     bool automaticFlip =
         gameMode == GameMode::PlayerVsEngine &&
-        game.get_engine_side() == 1;
+        configuredEngineSide == 1;
 
     return automaticFlip != manualBoardFlip;
 }
@@ -942,7 +950,7 @@ void ChessUI::drawText() {
     }
 
     else if (gameMode == GameMode::PlayerVsEngine) {
-        if (game.get_engine_side() == 0)
+        if (configuredEngineSide == 0)
             mode = "Player vs Engine | Player: Black";
         else
             mode = "Player vs Engine | Player: White";
@@ -2077,7 +2085,8 @@ void ChessUI::clearSelection() {
 }
 
 void ChessUI::startGame(int engineSide, GameMode mode) {
-    game = Board(engineSide);
+    configuredEngineSide = engineSide;
+    game = Board();
     startingBoard = game;
 
     gameMode = mode;
@@ -2103,4 +2112,8 @@ void ChessUI::startGame(int engineSide, GameMode mode) {
     engineStalled = false;
     engineFrameDelay = 0;
     historyPaused = false;
+}
+
+Engine& ChessUI::engineForTurn() {
+    return game.get_current_turn() == 0 ? whiteEngine : blackEngine;
 }

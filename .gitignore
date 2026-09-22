@@ -25,3 +25,7 @@ replay_pid*
 
 #executable files
 *.exe
+
+# CMake build directories
+/build/
+/build-*/
