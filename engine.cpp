@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <stdexcept>
-#include <utility>
 
 Engine::Engine(int engine_side, int search_depth,
                std::unique_ptr<Evaluator> engine_evaluator)
@@ -79,8 +78,7 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
     const int turn_before = board.get_current_turn();
 
     for (const Move& move : board.legal_moves()) {
-        auto [old_x, old_y, new_x, new_y] = move;
-        if (!board.make_move(old_x, old_y, new_x, new_y)) continue;
+        if (!board.make_move(move)) continue;
 
         bool turn_changed = board.get_current_turn() != turn_before;
         int child_score;
@@ -115,7 +113,7 @@ bool Engine::find_best_move(const Board& position, int requested_depth) {
     int search_depth = requested_depth < 0 ? default_search_depth : requested_depth;
     if (search_depth < 1) throw std::invalid_argument("search depth must be positive");
 
-    best_move = {-1, -1, -1, -1};
+    best_move = Move{};
     search_nodes = 0;
     closed_window_nodes = 0;
     transposition.clear();
@@ -124,7 +122,7 @@ bool Engine::find_best_move(const Board& position, int requested_depth) {
 
     Board search_board = position;
     negamax_search(search_board, 0, search_depth, NEGINF, INF, &best_move);
-    return std::get<0>(best_move) != -1;
+    return best_move.old_x != -1;
 }
 
 const Move& Engine::get_best_move() const { return best_move; }

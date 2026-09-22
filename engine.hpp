@@ -5,7 +5,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <tuple>
 #include <unordered_map>
 
 class Engine {
@@ -20,7 +19,7 @@ class Engine {
     int side;
     int default_search_depth;
     std::unique_ptr<Evaluator> evaluator;
-    Move best_move{-1, -1, -1, -1};
+    Move best_move{};
     std::size_t search_nodes = 0;
     std::size_t closed_window_nodes = 0;
     std::unordered_map<Hash, TranspositionEntry> transposition;

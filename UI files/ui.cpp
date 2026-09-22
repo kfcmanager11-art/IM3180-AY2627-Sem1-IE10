@@ -53,7 +53,16 @@ bool ChessUI::applyMove(int fromRow, int fromCol, int toRow, int toCol) {
 
     if (!game.make_move(fromRow, fromCol, toRow, toCol)) return false;
 
-    MoveHistoryEntry entry{movedPiece, fromRow, fromCol, toRow, toCol, capturedPiece, game};
+    MoveHistoryEntry entry{
+        movedPiece,
+        fromRow,
+        fromCol,
+        toRow,
+        toCol,
+        capturedPiece,
+        game.get_last_move().special_move,
+        game
+    };
 
     int newNode = static_cast<int>(historyTree.size());
     historyTree.push_back({entry, currentHistoryNode, {}});
@@ -125,13 +134,13 @@ void ChessUI::updateEngine() {
         return;
     }
 
-    auto [fromRow, fromCol, toRow, toCol] = engine.get_best_move();
+    const Move& bestMove = engine.get_best_move();
 
     if (!applyMove(
-            fromRow,
-            fromCol,
-            toRow,
-            toCol)) {
+            bestMove.old_x,
+            bestMove.old_y,
+            bestMove.new_x,
+            bestMove.new_y)) {
         engineStalled = true;
     }
 }
@@ -1994,6 +2003,11 @@ std::string ChessUI::moveToText(const MoveHistoryEntry& move) const {
         return square;
     };
 
+    if (move.specialMove == SpecialMove::CastleKingside)
+        return "O-O";
+    if (move.specialMove == SpecialMove::CastleQueenside)
+        return "O-O-O";
+
     char pieceLetter = ' ';
 
     int piece = std::abs(move.piece);
@@ -2014,6 +2028,9 @@ std::string ChessUI::moveToText(const MoveHistoryEntry& move) const {
     text += move.capturedPiece != 0 ? "x" : "-";
 
     text += squareName(move.toRow, move.toCol);
+
+    if (move.specialMove == SpecialMove::PromoteQueen)
+        text += "=Q";
 
     return text;
 }

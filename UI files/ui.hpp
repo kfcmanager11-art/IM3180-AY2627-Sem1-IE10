@@ -20,6 +20,7 @@ struct MoveHistoryEntry {
     int toCol;
 
     int capturedPiece;
+    SpecialMove specialMove = SpecialMove::None;
 
     Board boardAfterMove;
 };
