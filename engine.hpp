@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <memory>
 #include <unordered_map>
+#include <deque>
 
 class Engine {
     enum class BoundType { Exact, Lower, Upper };
@@ -26,6 +27,8 @@ class Engine {
 
     int negamax_search(Board& board, int depth, int max_depth,
                        int alpha, int beta, Move* root_move = nullptr);
+
+    std::deque<std::pair<int,Hash>> evaluation_cache;
 
 public:
     explicit Engine(int side, int search_depth = 2,

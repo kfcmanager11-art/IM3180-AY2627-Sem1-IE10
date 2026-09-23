@@ -30,7 +30,7 @@ class ChessUI {
 public:
     explicit ChessUI(
         int engineSide = 0,
-        int searchDepth = 2,
+        int searchDepth = 3,
         std::unique_ptr<Evaluator> whiteEvaluator = nullptr,
         std::unique_ptr<Evaluator> blackEvaluator = nullptr
     );

@@ -167,7 +167,15 @@ Hash Board::calculate_hash() const {
 }
 
 void Board::refresh_hash() {
-    board_hash = calculate_hash();
+   // board_hash = calculate_hash();
+}
+
+void Board::set_piece_with_hash(int row, int column, int piece) {
+    const int square = row * 8 + column;
+    // Empty squares have keys too, so both sides of every replacement matter.
+    board_hash ^= piece_hash.at(current_board[row][column] * 64 + square);
+    current_board[row][column] = piece;
+    board_hash ^= piece_hash.at(piece * 64 + square);
 }
 
 bool Board::valid_castle(int old_x, int old_y, int new_x, int new_y,
@@ -271,17 +279,48 @@ bool Board::valid_move_geometry(int old_x, int old_y, int new_x, int new_y,
 
 std::vector<Move> Board::legal_moves() {
     std::vector<Move> moves;
+    if (has_game_ended()) return moves;
+
     for (int old_x = 0; old_x < 8; ++old_x) {
         for (int old_y = 0; old_y < 8; ++old_y) {
-            if (current_board[old_x][old_y] == 0) continue;
-            for (int new_x = 0; new_x < 8; ++new_x) {
-                for (int new_y = 0; new_y < 8; ++new_y) {
-                    SpecialMove special_move = SpecialMove::None;
-                    if (valid_move_geometry(old_x, old_y, new_x, new_y, &special_move)) {
-                        moves.push_back({old_x, old_y, new_x, new_y, special_move});
-                    }
+            const int piece = current_board[old_x][old_y];
+            if (piece == 0 || (piece < 0) != (turn == 1)) continue;
+
+            const auto first_move = moves.size();
+            auto add_candidate = [&](int new_x, int new_y) {
+                SpecialMove special_move = SpecialMove::None;
+                if (valid_move_geometry(old_x, old_y, new_x, new_y, &special_move)) {
+                    moves.push_back({old_x, old_y, new_x, new_y, special_move});
                 }
+            };
+            auto add_offsets = [&](const std::vector<std::pair<int, int>>& offsets) {
+                for (const auto& [dx, dy] : offsets)
+                    add_candidate(old_x + dx, old_y + dy);
+            };
+
+            if (std::abs(piece) == 1) {
+                add_offsets(pawn_move_pattern.at(piece));
+                if (move_left == 2)
+                    add_offsets(pawn_capture_pattern.at(piece));
+            } else {
+                const auto pattern = move_pattern.find(piece);
+                if (pattern != move_pattern.end())
+                    add_offsets(pattern->second);
             }
+
+            // Castling destinations are outside the king's ordinary offsets.
+            if (std::abs(piece) == 6 && old_x == home_row_for_piece(piece)
+                && old_y == KingColumn) {
+                add_candidate(old_x, QueensideRookColumn + 1);
+                add_candidate(old_x, KingsideRookColumn - 2);
+            }
+
+            // Keep search ordering and tie-breaking unchanged by this optimization.
+            std::sort(moves.begin() + first_move, moves.end(),
+                      [](const Move& left, const Move& right) {
+                          return left.new_x < right.new_x
+                              || (left.new_x == right.new_x && left.new_y < right.new_y);
+                      });
         }
     }
     return moves;
@@ -360,15 +399,22 @@ bool Board::make_move(const Move& requested_move) {
         move_left,
         game_status,
         castling_rights,
-        last_move
+        last_move,
+        board_hash
     });
+
+    board_hash ^= turn_hash.at(turn);
+    board_hash ^= move_left_hash.at(move_left);
+    board_hash ^= castling_rights_hash.at(castling_rights);
 
     update_castling_rights(applied_move.old_x, applied_move.old_y,
                            applied_move.new_x, applied_move.new_y,
                            moved_piece, captured_piece);
 
-    current_board[applied_move.old_x][applied_move.old_y] = 0;
-    current_board[applied_move.new_x][applied_move.new_y] = moved_piece;
+    const int placed_piece = canonical_special == SpecialMove::PromoteQueen
+        ? (moved_piece > 0 ? 5 : -5) : moved_piece;
+    set_piece_with_hash(applied_move.old_x, applied_move.old_y, 0);
+    set_piece_with_hash(applied_move.new_x, applied_move.new_y, placed_piece);
 
     if (canonical_special == SpecialMove::CastleKingside
         || canonical_special == SpecialMove::CastleQueenside) {
@@ -377,12 +423,8 @@ bool Board::make_move(const Move& requested_move) {
             ? KingsideRookColumn : QueensideRookColumn;
         const int new_rook_column = canonical_special == SpecialMove::CastleKingside
             ? KingsideRookColumn - 3 : QueensideRookColumn + 2;
-        current_board[home_row][old_rook_column] = 0;
-        current_board[home_row][new_rook_column] = moved_piece > 0 ? 4 : -4;
-    }
-
-    if (canonical_special == SpecialMove::PromoteQueen) {
-        current_board[applied_move.new_x][applied_move.new_y] = moved_piece > 0 ? 5 : -5;
+        set_piece_with_hash(home_row, old_rook_column, 0);
+        set_piece_with_hash(home_row, new_rook_column, moved_piece > 0 ? 4 : -4);
     }
 
     if (captured_piece != 0) {
@@ -398,7 +440,9 @@ bool Board::make_move(const Move& requested_move) {
     }
 
     last_move = applied_move;
-    refresh_hash();
+    board_hash ^= turn_hash.at(turn);
+    board_hash ^= move_left_hash.at(move_left);
+    board_hash ^= castling_rights_hash.at(castling_rights);
     return true;
 }
 
@@ -437,5 +481,5 @@ void Board::rollback_move() {
     game_status = state.old_game_status;
     castling_rights = state.old_castling_rights;
     last_move = state.old_last_move;
-    refresh_hash();
+    board_hash = state.old_hash;
 }

@@ -49,6 +49,7 @@ class Board{
         int old_game_status = 0;
         std::uint8_t old_castling_rights = 0;
         Move old_last_move;
+        Hash old_hash = 0;
     };
 
     std::vector<std::vector<int>> current_board{8, std::vector<int> (8, 0)};
@@ -74,6 +75,7 @@ class Board{
                                 int moved_piece, int captured_piece);
     Hash calculate_hash() const;
     void refresh_hash();
+    void set_piece_with_hash(int row, int column, int piece);
 
 public:
     Board();
