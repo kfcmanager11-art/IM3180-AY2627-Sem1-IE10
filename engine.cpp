@@ -81,6 +81,51 @@ void Engine::clear_transposition() {
               TranspositionEntry{});
 }
 
+std::vector<Move> Engine::order_moves(Board& board,
+                                      std::uint32_t tt_best) const {
+    const std::vector<Move> legal = board.legal_moves();
+    const std::size_t n = legal.size();
+
+    // Piece values for MVV-LVA: pawn..king (king = 99999 in the standard
+    // config, so a king capture sorts to the very top).
+    constexpr int piece_value[7] = {0, 1, 3, 3, 5, 9, 99999};
+
+    // Score each move: MVV-LVA for captures, 0 for quiet moves.
+    std::vector<int> scores(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Move& move = legal[i];
+        const int victim = board.get_piece(move.new_x, move.new_y);
+        if (victim == 0) continue;
+        const int attacker = board.get_piece(move.old_x, move.old_y);
+        scores[i] = piece_value[std::abs(victim)] * 8 -
+                    piece_value[std::abs(attacker)];
+    }
+
+    // Stable index sort: highest score first; quiet moves and equal scores
+    // keep board order, so tie-breaking stays deterministic.
+    std::vector<std::size_t> idx(n);
+    for (std::size_t i = 0; i < n; ++i) idx[i] = i;
+    std::stable_sort(idx.begin(), idx.end(),
+                     [&scores](std::size_t a, std::size_t b) {
+                         return scores[a] > scores[b];
+                     });
+
+    std::vector<Move> moves(n);
+    for (std::size_t i = 0; i < n; ++i) moves[i] = legal[idx[i]];
+
+    // TT best move first, if it is still legal.
+    if (tt_best != 0) {
+        const Move best = decode_move(tt_best);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (moves[i] == best) {
+                std::swap(moves[0], moves[i]);
+                break;
+            }
+        }
+    }
+    return moves;
+}
+
 int Engine::negamax_search(Board& board, int depth, int max_depth,
                            int alpha, int beta, Move* root_move) {
     ++search_nodes;
@@ -107,7 +152,14 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
     bool found_move = false;
     const int turn_before = board.get_current_turn();
 
-    for (const Move& move : board.legal_moves()) {
+    // TT best move first, then captures by MVV-LVA, then quiet moves.
+    const std::uint32_t tt_best = (entry.key == key &&
+                                   entry.depth >= max_depth - depth)
+                                      ? entry.best_move
+                                      : 0;
+    const std::vector<Move> moves = order_moves(board, tt_best);
+
+    for (const Move& move : moves) {
         if (!board.make_move(move)) continue;
 
         bool turn_changed = board.get_current_turn() != turn_before;
