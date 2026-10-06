@@ -4,8 +4,8 @@
 int main() {
     ChessUI ui(
         1,
-        3,
-        nullptr,
+        2,
+        std::make_unique<NewEvaluator>(),
         std::make_unique<NewEvaluator>()
     );
     ui.run();
