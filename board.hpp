@@ -13,7 +13,10 @@ enum class SpecialMove : std::uint8_t {
     None = 0,
     CastleKingside = 1,
     CastleQueenside = 2,
-    PromoteQueen = 3
+    PromoteQueen = 3,
+    PromoteRook = 4,
+    PromoteBishop = 5,
+    PromoteKnight = 6
 };
 
 struct Move {

@@ -30,6 +30,22 @@ int home_row_for_piece(int piece) {
     return piece > 0 ? WhiteHomeRow : BlackHomeRow;
 }
 
+bool is_promotion(SpecialMove s) {
+    return s == SpecialMove::PromoteQueen || s == SpecialMove::PromoteRook
+        || s == SpecialMove::PromoteBishop || s == SpecialMove::PromoteKnight;
+}
+
+int promotion_piece(SpecialMove s, int moved_piece) {
+    const bool white = moved_piece > 0;
+    switch (s) {
+        case SpecialMove::PromoteQueen:  return white ? 5 : -5;
+        case SpecialMove::PromoteRook:   return white ? 4 : -4;
+        case SpecialMove::PromoteBishop: return white ? 3 : -3;
+        case SpecialMove::PromoteKnight: return white ? 2 : -2;
+        default:                         return moved_piece;
+    }
+}
+
 } // namespace
 
 Board::Board() {
@@ -167,7 +183,7 @@ Hash Board::calculate_hash() const {
 }
 
 void Board::refresh_hash() {
-   // board_hash = calculate_hash();
+    board_hash = calculate_hash();
 }
 
 void Board::set_piece_with_hash(int row, int column, int piece) {
@@ -289,7 +305,16 @@ std::vector<Move> Board::legal_moves() {
             const auto first_move = moves.size();
             auto add_candidate = [&](int new_x, int new_y) {
                 SpecialMove special_move = SpecialMove::None;
-                if (valid_move_geometry(old_x, old_y, new_x, new_y, &special_move)) {
+                if (!valid_move_geometry(old_x, old_y, new_x, new_y, &special_move))
+                    return;
+                if (special_move == SpecialMove::PromoteQueen) {
+                    const SpecialMove promos[] = {
+                        SpecialMove::PromoteQueen, SpecialMove::PromoteRook,
+                        SpecialMove::PromoteBishop, SpecialMove::PromoteKnight
+                    };
+                    for (const SpecialMove p : promos)
+                        moves.push_back({old_x, old_y, new_x, new_y, p});
+                } else {
                     moves.push_back({old_x, old_y, new_x, new_y, special_move});
                 }
             };
@@ -318,8 +343,12 @@ std::vector<Move> Board::legal_moves() {
             // Keep search ordering and tie-breaking unchanged by this optimization.
             std::sort(moves.begin() + first_move, moves.end(),
                       [](const Move& left, const Move& right) {
-                          return left.new_x < right.new_x
-                              || (left.new_x == right.new_x && left.new_y < right.new_y);
+                          if (left.new_x != right.new_x)
+                              return left.new_x < right.new_x;
+                          if (left.new_y != right.new_y)
+                              return left.new_y < right.new_y;
+                          return static_cast<std::uint8_t>(left.special_move)
+                              < static_cast<std::uint8_t>(right.special_move);
                       });
         }
     }
@@ -376,17 +405,28 @@ bool Board::make_move(const Move& requested_move) {
         return false;
     }
 
-    if (requested_move.special_move != SpecialMove::None
+    const bool promo_square = (canonical_special == SpecialMove::PromoteQueen);
+    if (promo_square) {
+        if (requested_move.special_move != SpecialMove::None
+            && !is_promotion(requested_move.special_move)) {
+            return false;
+        }
+    } else if (requested_move.special_move != SpecialMove::None
         && requested_move.special_move != canonical_special) {
         return false;
     }
+
+    const SpecialMove applied_special =
+        promo_square && requested_move.special_move != SpecialMove::None
+            ? requested_move.special_move
+            : canonical_special;
 
     Move applied_move{
         requested_move.old_x,
         requested_move.old_y,
         requested_move.new_x,
         requested_move.new_y,
-        canonical_special
+        applied_special
     };
     const int moved_piece = current_board[applied_move.old_x][applied_move.old_y];
     const int captured_piece = current_board[applied_move.new_x][applied_move.new_y];
@@ -411,8 +451,7 @@ bool Board::make_move(const Move& requested_move) {
                            applied_move.new_x, applied_move.new_y,
                            moved_piece, captured_piece);
 
-    const int placed_piece = canonical_special == SpecialMove::PromoteQueen
-        ? (moved_piece > 0 ? 5 : -5) : moved_piece;
+    const int placed_piece = promotion_piece(applied_special, moved_piece);
     set_piece_with_hash(applied_move.old_x, applied_move.old_y, 0);
     set_piece_with_hash(applied_move.new_x, applied_move.new_y, placed_piece);
 

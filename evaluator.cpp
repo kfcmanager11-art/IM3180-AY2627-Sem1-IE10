@@ -37,7 +37,7 @@ EngineConfig EngineConfig::standard() {
        -30,-40,-40,-50,-50,-40,-40,-30,
        -30,-40,-40,-50,-50,-40,-40,-30
     };
-    config.piece_value = {0, 1, 3, 3, 5, 9, 99};
+    config.piece_value = {0, 1, 3, 3, 5, 9, 99999};
     config.passed_pawn_bonus = {0, 5, 15, 30, 60, 100, 160, 0};
     return config;
 }
@@ -49,7 +49,7 @@ const EngineConfig& StandardEvaluator::get_config() const { return config; }
 
 int StandardEvaluator::evaluate(const Board& board) const {
     if (board.has_game_ended()) {
-        int winner_score = board.get_game_status() > 0 ? 999999 : -999999;
+        int winner_score = board.get_game_status() > 0 ? 1e9 : -1e9;
         return winner_score * (board.get_current_turn() ? -1 : 1);
     }
 

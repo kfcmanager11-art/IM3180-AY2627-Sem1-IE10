@@ -4,18 +4,30 @@
 #include "evaluator.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <deque>
 
 class Engine {
-    enum class BoundType { Exact, Lower, Upper };
+    enum class BoundType : std::uint8_t { Exact = 0, Lower = 1, Upper = 2 };
+
+    // Flat open-addressed transposition table with a fixed size per engine
+    // (1M entries = 16 MiB). A slot whose key is 0 is empty; a hit requires
+    // an exact 64-bit key match.
+    static constexpr std::size_t kTTSize = 1u << 20;
+    static constexpr std::size_t kTTMask = kTTSize - 1;
 
     struct TranspositionEntry {
-        int depth;
-        int score;
-        BoundType bound;
+        std::uint64_t key = 0;
+        int score = 0;
+        std::uint8_t depth = 0;    // remaining depth when stored
+        std::uint8_t bound = 0;    // BoundType
+        std::uint32_t best_move = 0; // encoded best move, 0 = none
     };
+
+    static std::uint32_t encode_move(const Move& move);
+    static Move decode_move(std::uint32_t packed);
+    void clear_transposition();
 
     int side;
     int default_search_depth;
@@ -23,7 +35,7 @@ class Engine {
     Move best_move{};
     std::size_t search_nodes = 0;
     std::size_t closed_window_nodes = 0;
-    std::unordered_map<Hash, TranspositionEntry> transposition;
+    std::unique_ptr<TranspositionEntry[]> transposition;
 
     int negamax_search(Board& board, int depth, int max_depth,
                        int alpha, int beta, Move* root_move = nullptr);
