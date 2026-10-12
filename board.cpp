@@ -59,18 +59,17 @@ Board::Board() {
     board_hash = 0;
     last_move = Move{};
 
-    std::uniform_int_distribution<Hash> distribution(0, UINT64_MAX);
     for (int piece = -6; piece <= 6; ++piece) {
         for (int square = 0; square < 64; ++square) {
-            piece_hash[piece * 64 + square] = distribution(rng);
+            piece_hash[piece * 64 + square] = kPieceHashes[(piece + 6) * 64 + square];
         }
     }
-    turn_hash[0] = distribution(rng);
-    turn_hash[1] = distribution(rng);
-    move_left_hash[1] = distribution(rng);
-    move_left_hash[2] = distribution(rng);
+    turn_hash[0] = kTurnHashes[0];
+    turn_hash[1] = kTurnHashes[1];
+    move_left_hash[1] = kMoveLeftHashes[0];
+    move_left_hash[2] = kMoveLeftHashes[1];
     for (int rights = 0; rights < 16; ++rights)
-        castling_rights_hash[rights] = distribution(rng);
+        castling_rights_hash[rights] = kCastlingRightsHashes[rights];
 
     for (int column = 0; column < 8; ++column) {
         current_board[1][column] = 1;

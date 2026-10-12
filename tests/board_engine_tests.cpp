@@ -599,6 +599,36 @@ void test_move_rollback_restores_hash() {
             "rolling back a quiet move should restore the complete position");
 }
 
+void test_independent_boards_share_position_hashes() {
+    Board first;
+    Board second;
+    require(first.get_hash() == second.get_hash(),
+            "independent initial boards must have identical position hashes");
+    const Hash initial_hash = first.get_hash();
+    std::uint32_t selection = 0x3180;
+    int played = 0;
+    for (; played < 40; ++played) {
+        const auto moves = first.legal_moves();
+        if (moves.empty()) break;
+        selection = selection * 1664525u + 1013904223u;
+        const Move move = moves[selection % moves.size()];
+        require(first.make_move(move) && second.make_move(move),
+                "independent boards rejected the same legal move");
+        require(first.get_hash() == second.get_hash(),
+                "identical move sequences must produce identical hashes");
+        require_hash_matches_recomputed(first, "fixed hash first board");
+        require_hash_matches_recomputed(second, "fixed hash second board");
+    }
+    for (int i = 0; i < played; ++i) {
+        first.rollback_move();
+        second.rollback_move();
+        require(first.get_hash() == second.get_hash(),
+                "independent rollback must preserve matching hashes");
+    }
+    require(first.get_hash() == initial_hash && second.get_hash() == initial_hash,
+            "independent boards must restore the fixed initial hash");
+}
+
 } // namespace
 
 int main() {
@@ -610,6 +640,7 @@ int main() {
         test_new_evaluator_is_injectable();
         test_search_does_not_mutate_position();
         test_move_rollback_restores_hash();
+        test_independent_boards_share_position_hashes();
         test_castling_and_rights();
         test_promotion_and_metadata();
         test_move_generation_matches_exhaustive_scan();
