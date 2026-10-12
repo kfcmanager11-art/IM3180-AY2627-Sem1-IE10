@@ -42,6 +42,12 @@ struct BoardTestAccess {
         return board.rollback.size();
     }
 
+    static bool captures_only_since(const Board& board, std::size_t history_size) {
+        for (std::size_t i = history_size; i < board.rollback.size(); ++i)
+            if (board.rollback[i].captured_piece == 0) return false;
+        return true;
+    }
+
     static int searched_turns(const Board& board, std::size_t root_history_size) {
         int turns = 0;
         for (std::size_t i = root_history_size; i < board.rollback.size(); ++i) {
@@ -66,6 +72,54 @@ struct BoardTestAccess {
 };
 
 struct EngineTestAccess {
+    static int quiescence_score(Engine& engine, Board& board,
+                                int alpha = NEGINF, int beta = INF, int capture_ply = 0) {
+        return engine.quiescence_search(board, alpha, beta, capture_ply);
+    }
+
+    static int quiescence_limit() { return Engine::kMaxQuiescencePly; }
+
+    static bool tt_is_empty(const Engine& engine) {
+        for (std::size_t i = 0; i < Engine::kTTSize; ++i) {
+            const auto& entry = engine.transposition[i];
+            if (entry.key || entry.score || entry.depth || entry.bound || entry.best_move)
+                return false;
+        }
+        return true;
+    }
+
+    static std::vector<Engine::TranspositionEntry> tt_snapshot(const Engine& engine) {
+        return std::vector<Engine::TranspositionEntry>(
+            engine.transposition.get(), engine.transposition.get() + Engine::kTTSize);
+    }
+
+    static bool tt_matches_snapshot(const Engine& engine,
+                                    const std::vector<Engine::TranspositionEntry>& snapshot) {
+        for (std::size_t i = 0; i < Engine::kTTSize; ++i) {
+            const auto& actual = engine.transposition[i];
+            const auto& expected = snapshot[i];
+            if (actual.key != expected.key || actual.score != expected.score ||
+                actual.depth != expected.depth || actual.bound != expected.bound ||
+                actual.best_move != expected.best_move)
+                return false;
+        }
+        return true;
+    }
+
+    static void seed_horizon_sentinel(Engine& engine, const Board& board) {
+        auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        entry.key = board.get_hash();
+        entry.score = 987654;
+        entry.depth = 255;
+        entry.bound = static_cast<std::uint8_t>(Engine::BoundType::Exact);
+        entry.best_move = Engine::encode_move(Move{3, 0, 3, 4});
+    }
+
+    static int horizon_score(Engine& engine, Board& board,
+                             int alpha = NEGINF, int beta = INF) {
+        return engine.negamax_search(board, 1, 1, alpha, beta, nullptr);
+    }
+
     static void seed_root_lower(Engine& engine, const Board& board, const Move& witness) {
         auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
         entry.key = board.get_hash();
@@ -113,6 +167,42 @@ public:
     explicit FixedEvaluator(int score) : score(score) {}
 
     int evaluate(const Board&) const override { return score; }
+};
+
+class MaterialOnlyEvaluator final : public Evaluator {
+public:
+    int evaluate(const Board& board) const override {
+        if (board.has_game_ended()) {
+            const int white_score = board.get_game_status() > 0 ? 100000 : -100000;
+            return board.get_current_turn() == 0 ? white_score : -white_score;
+        }
+        constexpr int values[] = {0, 100, 300, 300, 500, 900, 0};
+        int white_score = 0;
+        for (int row = 0; row < 8; ++row) {
+            for (int column = 0; column < 8; ++column) {
+                const int piece = board.get_piece(row, column);
+                white_score += piece > 0 ? values[piece] : -values[-piece];
+            }
+        }
+        return board.get_current_turn() == 0 ? white_score : -white_score;
+    }
+};
+
+class CaptureOnlyRecordingEvaluator final : public Evaluator {
+    std::vector<Move>& evaluated_moves;
+    std::size_t root_history_size;
+    MaterialOnlyEvaluator material;
+public:
+    CaptureOnlyRecordingEvaluator(std::vector<Move>& moves, std::size_t history_size = 0)
+        : evaluated_moves(moves), root_history_size(history_size) {}
+
+    int evaluate(const Board& board) const override {
+        if (!BoardTestAccess::captures_only_since(board, root_history_size))
+            throw std::runtime_error("quiescence searched a quiet move");
+        if (BoardTestAccess::undo_size(board) > root_history_size)
+            evaluated_moves.push_back(board.get_last_move());
+        return material.evaluate(board);
+    }
 };
 
 class SpecialMoveEvaluator final : public Evaluator {
@@ -770,9 +860,35 @@ void test_shallow_tt_move_orders_deeper_search_without_reusing_its_score() {
             "warm iterative re-search lost the final-depth best move");
 }
 
+int exhaustive_capture_score(Board& board, const Evaluator& evaluator, int capture_ply = 0) {
+    if (board.has_game_ended()) return evaluator.evaluate(board);
+    const int turn = board.get_current_turn();
+    const auto moves = board.legal_moves();
+    for (const Move& move : moves) {
+        if (std::abs(board.get_piece(move.new_x, move.new_y)) != 6) continue;
+        require(board.make_move(move), "capture oracle rejected king capture");
+        const int score = evaluator.evaluate(board);
+        const bool changed = board.get_current_turn() != turn;
+        board.rollback_move();
+        return changed ? -score : score;
+    }
+    int best = evaluator.evaluate(board);
+    if (capture_ply >= EngineTestAccess::quiescence_limit()) return best;
+    for (const Move& move : moves) {
+        if (board.get_piece(move.new_x, move.new_y) == 0) continue;
+        require(board.make_move(move), "capture oracle rejected a generated capture");
+        const bool changed = board.get_current_turn() != turn;
+        const int child = exhaustive_capture_score(board, evaluator, capture_ply + 1);
+        best = std::max(best, changed ? -child : child);
+        board.rollback_move();
+    }
+    return best;
+}
+
 int exhaustive_score(Board& board, const Evaluator& evaluator, int depth, int target) {
-    if (board.has_game_ended() || (board.get_moves_left() == 2 && depth >= target))
-        return evaluator.evaluate(board);
+    if (board.has_game_ended()) return evaluator.evaluate(board);
+    if (board.get_moves_left() == 2 && depth >= target)
+        return exhaustive_capture_score(board, evaluator);
     const int turn = board.get_current_turn();
     int best = NEGINF;
     for (const Move& move : board.legal_moves()) {
@@ -812,6 +928,304 @@ void test_iterative_search_matches_exhaustive_final_depth() {
             }
         }
     }
+}
+
+void test_horizon_search_finds_free_rook_capture() {
+    for (int side : {0, 1}) {
+        Board board;
+        BoardTestAccess::empty(board, side, 2, 0);
+        BoardTestAccess::set_piece(board, 0, 0, 6);
+        BoardTestAccess::set_piece(board, 7, 7, -6);
+        BoardTestAccess::set_piece(board, 3, 0, 4);
+        BoardTestAccess::set_piece(board, 3, 4, -4);
+        const Board before = board;
+        const auto history_size = BoardTestAccess::undo_size(board);
+        Engine engine(side, 1, std::make_unique<MaterialOnlyEvaluator>());
+        require(engine.evaluate(board) == 0, "free-rook fixture material is not equal");
+        require(EngineTestAccess::horizon_score(engine, board) == 500,
+                "horizon search must discover the free rook capture for either side");
+        require(same_board(board, before) && BoardTestAccess::undo_size(board) == history_size,
+                "horizon capture search changed the authoritative position");
+    }
+}
+
+void test_quiescence_resolves_king_capture_before_stand_pat_or_limit() {
+    for (int side : {0, 1}) {
+        Board board;
+        BoardTestAccess::empty(board, side, 2, 0);
+        BoardTestAccess::set_piece(board, side == 0 ? 0 : 3, 0, 6);
+        BoardTestAccess::set_piece(board, side == 0 ? 3 : 7, side == 0 ? 4 : 7, -6);
+        BoardTestAccess::set_piece(board, 3, side == 0 ? 0 : 4, side == 0 ? 4 : -4);
+        const Board before = board;
+        Engine engine(side, 1, std::make_unique<MaterialOnlyEvaluator>());
+        for (int capture_ply : {0, EngineTestAccess::quiescence_limit()}) {
+            require(EngineTestAccess::quiescence_score(engine, board, NEGINF, INF, capture_ply)
+                        == 100000,
+                    "immediate king capture must be resolved even at the quiescence limit");
+            require(EngineTestAccess::quiescence_score(engine, board, NEGINF, 0, capture_ply)
+                        == 100000,
+                    "stand-pat cutoff must not hide an immediate terminal win");
+            require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+                    "king-capture quiescence did not restore the board");
+        }
+    }
+}
+
+void test_quiescence_declines_losing_queen_capture() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 0, 5);
+    BoardTestAccess::set_piece(board, 3, 4, -4);
+    BoardTestAccess::set_piece(board, 4, 5, -1);
+    const Board before = board;
+    std::vector<Move> explored;
+    Engine engine(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored));
+    require(EngineTestAccess::quiescence_score(engine, board) == 300,
+            "quiescence must decline a rook capture that loses the queen to recapture");
+    require(std::find(explored.begin(), explored.end(), Move{4, 5, 3, 4}) != explored.end(),
+            "quiescence did not explore the pawn recapture");
+    require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+            "losing-trade search changed the board");
+}
+
+void test_quiescence_keeps_profitable_trade_after_recapture() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 3, 1);
+    BoardTestAccess::set_piece(board, 4, 4, -4);
+    BoardTestAccess::set_piece(board, 5, 5, -1);
+    const Board before = board;
+    std::vector<Move> explored;
+    Engine engine(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored));
+    require(engine.evaluate(board) == -500, "profitable-trade fixture material is wrong");
+    require(EngineTestAccess::quiescence_score(engine, board) == -100,
+            "quiescence must include the pawn recapture after winning the rook");
+    require(std::find(explored.begin(), explored.end(), Move{5, 5, 4, 4}) != explored.end(),
+            "profitable-trade search omitted the opponent's recapture");
+    require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+            "profitable-trade search changed the board");
+}
+
+void test_quiescence_excludes_quiet_moves_castling_and_quiet_promotion() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2);
+    BoardTestAccess::set_piece(board, 0, 3, 6);
+    BoardTestAccess::set_piece(board, 0, 7, 4);
+    BoardTestAccess::set_piece(board, 6, 3, 1);
+    BoardTestAccess::set_piece(board, 7, 0, -6);
+    const auto moves = board.legal_moves();
+    require(std::any_of(moves.begin(), moves.end(), [](const Move& move) {
+        return move.special_move == SpecialMove::CastleKingside;
+    }), "quiet-only fixture must offer castling");
+    require(std::any_of(moves.begin(), moves.end(), [](const Move& move) {
+        return move.special_move == SpecialMove::PromoteQueen;
+    }), "quiet-only fixture must offer a quiet promotion");
+    const Board before = board;
+    std::vector<Move> explored;
+    Engine engine(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored));
+    require(EngineTestAccess::quiescence_score(engine, board) == 600 && explored.empty(),
+            "quiescence must not play quiet moves, castling or quiet promotions");
+    require(same_board(board, before), "quiet-only quiescence changed the board");
+}
+
+void test_quiescence_respects_one_action_capture_restriction() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 0, 4);
+    BoardTestAccess::set_piece(board, 3, 4, -4);
+    const Board before = board;
+    std::vector<Move> explored;
+    Engine engine(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored));
+    require(EngineTestAccess::quiescence_score(engine, board) == 0 && explored.empty(),
+            "quiescence must not capture with only one action left");
+    require(same_board(board, before), "one-action quiescence changed the board");
+}
+
+void test_quiescence_searches_capture_promotions_for_both_sides() {
+    for (int side : {0, 1}) {
+        Board board;
+        const int sign = side == 0 ? 1 : -1;
+        const int pawn_row = side == 0 ? 6 : 1;
+        const int promotion_row = side == 0 ? 7 : 0;
+        BoardTestAccess::empty(board, side, 2, 0);
+        BoardTestAccess::set_piece(board, 0, 0, 6);
+        BoardTestAccess::set_piece(board, 7, 7, -6);
+        BoardTestAccess::set_piece(board, pawn_row, 3, sign);
+        BoardTestAccess::set_piece(board, promotion_row, 4, -sign * 4);
+        const Board before = board;
+        std::vector<Move> explored;
+        Engine engine(side, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored));
+        require(EngineTestAccess::quiescence_score(engine, board) == 900,
+                "capture-only quiescence must retain the best capture promotion");
+        for (const auto promotion : {SpecialMove::PromoteQueen, SpecialMove::PromoteRook,
+                                     SpecialMove::PromoteBishop, SpecialMove::PromoteKnight}) {
+            require(std::find(explored.begin(), explored.end(),
+                              Move{pawn_row, 3, promotion_row, 4, promotion}) != explored.end(),
+                    "quiescence omitted a legal capture underpromotion");
+        }
+        require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+                "capture-promotion quiescence did not restore the board");
+    }
+}
+
+void test_quiescence_limit_and_tt_isolation() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 0, 4);
+    BoardTestAccess::set_piece(board, 3, 4, -4);
+    const Board before = board;
+    Engine engine(0, 1, std::make_unique<MaterialOnlyEvaluator>());
+    require(EngineTestAccess::quiescence_score(engine, board, NEGINF, INF,
+                                              EngineTestAccess::quiescence_limit()) == 0,
+            "capture-ply budget must stop ordinary capture expansion");
+    require(EngineTestAccess::quiescence_score(engine, board) == 500,
+            "normal quiescence must still search the capture");
+    require(EngineTestAccess::tt_is_empty(engine),
+            "quiescence must not publish tactical-only entries into the normal TT");
+    require(same_board(board, before), "bounded quiescence changed the board");
+}
+
+void test_quiescence_preserves_existing_undo_history() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 3, 1);
+    BoardTestAccess::set_piece(board, 4, 4, -4);
+    BoardTestAccess::set_piece(board, 5, 5, -1);
+    const Board initial = board;
+    require(board.make_move(3, 3, 4, 4), "existing-history fixture capture failed");
+    const Board before = board;
+    const auto history_size = BoardTestAccess::undo_size(board);
+    std::vector<Move> explored;
+    Engine engine(1, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(explored, history_size));
+    require(EngineTestAccess::quiescence_score(engine, board) == 100,
+            "quiescence did not resolve the existing capture's recapture");
+    require(same_board(board, before) && BoardTestAccess::undo_size(board) == history_size,
+            "quiescence damaged existing undo history");
+    require_hash_matches_recomputed(board, "quiescence with existing history");
+    board.rollback_move();
+    require(same_board(board, initial), "pre-existing undo no longer restores the board");
+}
+
+void test_quiescence_matches_exhaustive_capture_oracle_and_windows() {
+    for (int side : {0, 1}) {
+        for (int actions : {1, 2}) {
+            Board board;
+            BoardTestAccess::empty(board, side, actions, 0);
+            BoardTestAccess::set_piece(board, 0, 0, 6);
+            BoardTestAccess::set_piece(board, 7, 7, -6);
+            BoardTestAccess::set_piece(board, 3, 0, 5);
+            BoardTestAccess::set_piece(board, 3, 4, -4);
+            BoardTestAccess::set_piece(board, 4, 5, -1);
+            BoardTestAccess::set_piece(board, 2, 3, 1);
+            const Board before = board;
+            Engine engine(side, 1, std::make_unique<MaterialOnlyEvaluator>());
+            Board oracle = board;
+            const int exact = exhaustive_capture_score(oracle, engine.get_evaluator());
+            require(EngineTestAccess::quiescence_score(engine, board) == exact,
+                    "alpha-beta quiescence differs from exhaustive capture minimax");
+            for (const auto window : {std::pair<int,int>{-1000, -800}, {-1000, 0},
+                                      {-1000, 1000}, {1000, 1100}}) {
+                const int actual = EngineTestAccess::quiescence_score(
+                    engine, board, window.first, window.second);
+                require(exact >= window.second ? window.second <= actual && actual <= exact
+                        : (exact <= window.first ? exact <= actual && actual <= window.first
+                                                : actual == exact),
+                        "quiescence returned an invalid alpha-beta bound");
+                require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+                        "quiescence cutoff failed to restore the position");
+            }
+            require(EngineTestAccess::tt_is_empty(engine), "capture oracle tests polluted TT");
+        }
+    }
+}
+
+void test_normal_search_uses_quiescence_after_a_quiet_horizon_move() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 6, -6);
+    BoardTestAccess::set_piece(board, 3, 3, 5);
+    BoardTestAccess::set_piece(board, 7, 3, -4);
+    const Board before = board;
+    Engine engine(0, 1, std::make_unique<MaterialOnlyEvaluator>());
+    require(engine.find_best_move(board, 1), "quiet-horizon fixture search found no move");
+    Board selected = board;
+    require(selected.make_move(engine.get_best_move()), "quiet-horizon search returned illegal move");
+    const int opponent_score = exhaustive_capture_score(selected, engine.get_evaluator());
+    require(-opponent_score == 400,
+            "depth-one search must avoid a quiet move that leaves the queen capturable");
+    require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+            "normal quiescence-enabled search changed its input position");
+}
+
+void test_quiescence_consumes_recursive_capture_budget() {
+    class CaptureDepthEvaluator final : public Evaluator {
+        std::size_t& maximum_history;
+        MaterialOnlyEvaluator material;
+    public:
+        explicit CaptureDepthEvaluator(std::size_t& maximum) : maximum_history(maximum) {}
+        int evaluate(const Board& board) const override {
+            if (!BoardTestAccess::captures_only_since(board, 0))
+                throw std::runtime_error("capture-chain search applied a quiet move");
+            maximum_history = std::max(maximum_history, BoardTestAccess::undo_size(board));
+            return material.evaluate(board);
+        }
+    };
+
+    const int limit = EngineTestAccess::quiescence_limit();
+    for (int start : {0, limit - 1, limit}) {
+        Board board;
+        BoardTestAccess::empty(board, 0, 2, 0);
+        BoardTestAccess::set_piece(board, 0, 0, 6);
+        BoardTestAccess::set_piece(board, 7, 7, -6);
+        BoardTestAccess::set_piece(board, 3, 3, -4);
+        for (int n = 0; n < 3; ++n) {
+            BoardTestAccess::set_piece(board, 3, n, 4);
+            BoardTestAccess::set_piece(board, n, 3, 4);
+        }
+        for (int n = 4; n < 8; ++n) {
+            BoardTestAccess::set_piece(board, 3, n, -4);
+            BoardTestAccess::set_piece(board, n, 3, -4);
+        }
+        const Board before = board;
+        std::size_t maximum_history = 0;
+        Engine engine(0, 1, std::make_unique<CaptureDepthEvaluator>(maximum_history));
+        EngineTestAccess::quiescence_score(engine, board, NEGINF, INF, start);
+        require(maximum_history == static_cast<std::size_t>(limit - start),
+                "each recursive capture must consume one unit of the tactical budget");
+        require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+                "long capture chain failed to restore the root");
+        require_hash_matches_recomputed(board, "bounded capture chain");
+    }
+}
+
+void test_horizon_quiescence_ignores_and_preserves_populated_tt() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 0, 4);
+    BoardTestAccess::set_piece(board, 3, 4, -4);
+    const Board before = board;
+    Engine engine(0, 1, std::make_unique<MaterialOnlyEvaluator>());
+    EngineTestAccess::seed_horizon_sentinel(engine, board);
+    const auto table_before = EngineTestAccess::tt_snapshot(engine);
+    require(EngineTestAccess::horizon_score(engine, board) == 500,
+            "horizon must enter quiescence before probing a matching normal TT entry");
+    require(EngineTestAccess::tt_matches_snapshot(engine, table_before),
+            "quiescence changed fields in a populated normal TT");
+    require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+            "populated-TT horizon test changed its input position");
 }
 
 void test_default_depth_is_three() {
@@ -886,6 +1300,19 @@ int main() {
         test_search_completes_shallow_iterations_before_final_depth();
         test_shallow_tt_move_orders_deeper_search_without_reusing_its_score();
         test_iterative_search_matches_exhaustive_final_depth();
+        test_horizon_search_finds_free_rook_capture();
+        test_quiescence_resolves_king_capture_before_stand_pat_or_limit();
+        test_quiescence_declines_losing_queen_capture();
+        test_quiescence_keeps_profitable_trade_after_recapture();
+        test_quiescence_excludes_quiet_moves_castling_and_quiet_promotion();
+        test_quiescence_respects_one_action_capture_restriction();
+        test_quiescence_searches_capture_promotions_for_both_sides();
+        test_quiescence_limit_and_tt_isolation();
+        test_quiescence_preserves_existing_undo_history();
+        test_quiescence_matches_exhaustive_capture_oracle_and_windows();
+        test_normal_search_uses_quiescence_after_a_quiet_horizon_move();
+        test_quiescence_consumes_recursive_capture_budget();
+        test_horizon_quiescence_ignores_and_preserves_populated_tt();
         test_default_depth_is_three();
         test_equal_depth_result_replaces_cached_lower_bound();
         test_retained_lower_bound_keeps_its_move_witness();

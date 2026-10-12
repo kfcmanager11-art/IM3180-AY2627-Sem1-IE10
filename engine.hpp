@@ -39,6 +39,9 @@ class Engine {
     std::size_t closed_window_nodes = 0;
     std::unique_ptr<TranspositionEntry[]> transposition;
 
+    static constexpr int kMaxQuiescencePly = 8;
+    int quiescence_search(Board& board, int alpha, int beta, int capture_ply);
+
     int negamax_search(Board& board, int depth, int max_depth,
                        int alpha, int beta, Move* root_move = nullptr);
 

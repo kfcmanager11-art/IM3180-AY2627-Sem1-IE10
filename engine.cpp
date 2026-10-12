@@ -121,13 +121,50 @@ std::vector<Move> Engine::order_moves(Board& board,
     return moves;
 }
 
+int Engine::quiescence_search(Board& board, int alpha, int beta, int capture_ply) {
+    ++search_nodes;
+    if (alpha >= beta) ++closed_window_nodes;
+    if (board.has_game_ended()) return evaluate(board);
+
+    int best_score = evaluate(board);
+    if (board.get_moves_left() != 2) return best_score;
+    const int turn_before = board.get_current_turn();
+    const std::vector<Move> moves = order_moves(board, 0);
+    for (const Move& move : moves) {
+        if (std::abs(board.get_piece(move.new_x, move.new_y)) != 6) continue;
+        if (!board.make_move(move)) continue;
+        const int terminal_score = board.get_current_turn() != turn_before
+            ? -evaluate(board) : evaluate(board);
+        board.rollback_move();
+        return terminal_score;
+    }
+
+    if (capture_ply >= kMaxQuiescencePly || best_score >= beta) return best_score;
+    alpha = std::max(alpha, best_score);
+
+    for (const Move& move : moves) {
+        if (board.get_piece(move.new_x, move.new_y) == 0) continue;
+        if (!board.make_move(move)) continue;
+        const bool turn_changed = board.get_current_turn() != turn_before;
+        const int score = turn_changed
+            ? -quiescence_search(board, -beta, -alpha, capture_ply + 1)
+            : quiescence_search(board, alpha, beta, capture_ply + 1);
+        board.rollback_move();
+        best_score = std::max(best_score, score);
+        alpha = std::max(alpha, score);
+        if (alpha >= beta) break;
+    }
+    return best_score;
+}
+
 int Engine::negamax_search(Board& board, int depth, int max_depth,
                            int alpha, int beta, Move* root_move) {
     ++search_nodes;
     if (alpha >= beta) ++closed_window_nodes;
 
     if (board.has_game_ended()) return evaluate(board);
-    if (board.get_moves_left() == 2 && depth >= max_depth) return evaluate(board);
+    if (board.get_moves_left() == 2 && depth >= max_depth)
+        return quiescence_search(board, alpha, beta, 0);
 
     const Hash key = board.get_hash();
     const int original_alpha = alpha;
