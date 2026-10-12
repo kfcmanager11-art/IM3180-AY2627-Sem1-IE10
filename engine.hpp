@@ -45,7 +45,9 @@ class Engine {
     std::deque<std::pair<int,Hash>> evaluation_cache;
 
 public:
-    explicit Engine(int side, int search_depth = 2,
+    static constexpr int kDefaultSearchDepth = 3;
+
+    explicit Engine(int side, int search_depth = kDefaultSearchDepth,
                     std::unique_ptr<Evaluator> evaluator = nullptr);
     Engine(int side, int search_depth, EngineConfig config);
 

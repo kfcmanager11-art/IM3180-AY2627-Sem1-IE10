@@ -4,7 +4,7 @@
 int main() {
     ChessUI ui(
         1,
-        2,
+        Engine::kDefaultSearchDepth,
         std::make_unique<NewEvaluator>(),
         std::make_unique<NewEvaluator>()
     );

@@ -40,7 +40,7 @@ public:
         const std::string&, const std::string&, bool)>;
     using MatchHistoryProvider = std::function<std::vector<MatchSummary>()>;
 
-    explicit ChessUI(int engineSide = 1, int searchDepth = 2,
+    explicit ChessUI(int engineSide = 1, int searchDepth = Engine::kDefaultSearchDepth,
                      std::unique_ptr<Evaluator> whiteEvaluator = nullptr,
                      std::unique_ptr<Evaluator> blackEvaluator = nullptr);
     void run();

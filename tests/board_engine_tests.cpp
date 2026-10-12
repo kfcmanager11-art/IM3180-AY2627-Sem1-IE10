@@ -814,6 +814,12 @@ void test_iterative_search_matches_exhaustive_final_depth() {
     }
 }
 
+void test_default_depth_is_three() {
+    Engine engine(0);
+    require(engine.get_search_depth() == 3,
+            "default depth should be 3 after GUI-workload benchmarking");
+}
+
 void test_equal_depth_result_replaces_cached_lower_bound() {
     Board board;
     Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
@@ -880,6 +886,7 @@ int main() {
         test_search_completes_shallow_iterations_before_final_depth();
         test_shallow_tt_move_orders_deeper_search_without_reusing_its_score();
         test_iterative_search_matches_exhaustive_final_depth();
+        test_default_depth_is_three();
         test_equal_depth_result_replaces_cached_lower_bound();
         test_retained_lower_bound_keeps_its_move_witness();
         test_colliding_children_cannot_corrupt_the_root_tt_move();
