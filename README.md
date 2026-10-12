@@ -15,6 +15,14 @@ cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
+On Windows, use the matching MinGW runtime DLLs when launching the GUI. For the
+UCRT64 toolchain, prepend its runtime directory in the launching terminal:
+
+```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+.\chess.exe
+```
+
 Run the public Board/Engine checks with:
 
 ```powershell
@@ -65,18 +73,23 @@ Engine white(0, 3, std::make_unique<KingSafetyEvaluator>());
 
 `Engine::find_best_move` searches on a private copy of the supplied `Board`, so
 the UI's authoritative position is not modified by search or evaluation.
+It searches completed-turn depths 1 through the requested depth, retaining the
+transposition table between iterations. A matching shallow entry supplies only
+its best-move ordering hint; cached scores and bounds require sufficient depth.
+Node counters include all iterations. The shared engine/UI default depth is 3;
+an explicit depth (including 4) can still be passed to either constructor or search.
 The same evaluator injection is available through `ChessUI`'s optional White
 and Black evaluator constructor arguments; omitting them keeps the standard
 evaluator for both sides.
 
 ## Running the game
 
-After building, run `build/chess.exe` (or the equivalent executable path for
+After building, run `chess.exe` from the repository root (or the equivalent executable path for
 the selected generator). The UI starts at the menu, where the game mode and
 engine side can be selected. The optional `ChessUI` constructor arguments still
 set the default engine side and search depth for code that constructs the UI
 directly:
 
 ```cpp
-ChessUI ui(1, 2); // default engine side: Black, search depth: 2
+ChessUI ui(1, Engine::kDefaultSearchDepth); // default: Black, depth 3
 ```
