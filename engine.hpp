@@ -9,6 +9,8 @@
 #include <deque>
 
 class Engine {
+    friend struct EngineTestAccess;
+
     enum class BoundType : std::uint8_t { Exact = 0, Lower = 1, Upper = 2 };
 
     // Flat open-addressed transposition table with a fixed size per engine
@@ -28,7 +30,6 @@ class Engine {
     static std::uint32_t encode_move(const Move& move);
     static Move decode_move(std::uint32_t packed);
     std::vector<Move> order_moves(Board& board, std::uint32_t tt_best) const;
-    void clear_transposition();
 
     int side;
     int default_search_depth;

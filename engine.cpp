@@ -76,11 +76,6 @@ Move Engine::decode_move(std::uint32_t packed) {
     return move;
 }
 
-void Engine::clear_transposition() {
-    std::fill(transposition.get(), transposition.get() + kTTSize,
-              TranspositionEntry{});
-}
-
 std::vector<Move> Engine::order_moves(Board& board,
                                       std::uint32_t tt_best) const {
     const std::vector<Move> legal = board.legal_moves();
@@ -138,25 +133,32 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
     const int original_alpha = alpha;
     const int original_beta = beta;
     TranspositionEntry& entry = transposition[key & kTTMask];
+    const std::uint32_t tt_best = entry.key == key ? entry.best_move : 0;
     if (entry.key == key && entry.depth >= max_depth - depth) {
-        if (entry.bound == static_cast<std::uint8_t>(BoundType::Exact))
-            return entry.score;
-        if (entry.bound == static_cast<std::uint8_t>(BoundType::Lower))
+        if (entry.bound == static_cast<std::uint8_t>(BoundType::Exact)) {
+            if (root_move == nullptr) return entry.score;
+            if (entry.best_move != 0) *root_move = decode_move(entry.best_move);
+        } else if (entry.bound == static_cast<std::uint8_t>(BoundType::Lower)) {
             alpha = std::max(alpha, entry.score);
-        else
+            if (alpha >= beta) {
+                if (root_move == nullptr) return entry.score;
+                if (entry.best_move != 0) *root_move = decode_move(entry.best_move);
+            }
+        } else {
             beta = std::min(beta, entry.score);
-        if (alpha >= beta) return entry.score;
+            if (alpha >= beta) {
+                if (root_move == nullptr) return entry.score;
+                if (entry.best_move != 0) *root_move = decode_move(entry.best_move);
+            }
+        }
     }
 
     int best_score = NEGINF;
+    std::uint32_t best_packed_move = 0;
     bool found_move = false;
     const int turn_before = board.get_current_turn();
 
     // TT best move first, then captures by MVV-LVA, then quiet moves.
-    const std::uint32_t tt_best = (entry.key == key &&
-                                   entry.depth >= max_depth - depth)
-                                      ? entry.best_move
-                                      : 0;
     const std::vector<Move> moves = order_moves(board, tt_best);
 
     for (const Move& move : moves) {
@@ -175,7 +177,7 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
         if (!found_move || child_score > best_score) {
             best_score = child_score;
             if (root_move) *root_move = move;
-            entry.best_move = encode_move(move);
+            best_packed_move = encode_move(move);
         }
         found_move = true;
         alpha = std::max(alpha, child_score);
@@ -188,16 +190,13 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
     const BoundType bound = best_score <= original_alpha
         ? BoundType::Upper
         : (best_score >= original_beta ? BoundType::Lower : BoundType::Exact);
-    // Replacement policy: a stale slot is taken over; otherwise a new entry
-    // must be at least as deep as the incumbent, so shallow probes never
-    // clobber deeper results.
-    const int new_depth = max_depth - depth;
+    const int new_depth = std::max(0, max_depth - depth);
     if (entry.key != key || new_depth >= entry.depth) {
         entry.key = key;
         entry.score = best_score;
         entry.depth = static_cast<std::uint8_t>(new_depth);
         entry.bound = static_cast<std::uint8_t>(bound);
-        if (!found_move) entry.best_move = 0;
+        entry.best_move = best_packed_move;
     }
     return best_score;
 }
@@ -209,12 +208,16 @@ bool Engine::find_best_move(const Board& position, int requested_depth) {
     best_move = Move{};
     search_nodes = 0;
     closed_window_nodes = 0;
-    clear_transposition();
 
     if (!is_turn(position)) return false;
 
     Board search_board = position;
-    negamax_search(search_board, 0, search_depth, NEGINF, INF, &best_move);
+    for (int iteration_depth = 1; iteration_depth <= search_depth; ++iteration_depth) {
+        Move iteration_move{};
+        negamax_search(search_board, 0, iteration_depth,
+                       NEGINF, INF, &iteration_move);
+        best_move = iteration_move;
+    }
     return best_move.old_x != -1;
 }
 

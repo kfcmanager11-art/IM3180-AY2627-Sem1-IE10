@@ -41,6 +41,59 @@ struct BoardTestAccess {
     static std::size_t undo_size(const Board& board) {
         return board.rollback.size();
     }
+
+    static int searched_turns(const Board& board, std::size_t root_history_size) {
+        int turns = 0;
+        for (std::size_t i = root_history_size; i < board.rollback.size(); ++i) {
+            const int next_turn = i + 1 < board.rollback.size()
+                ? board.rollback[i + 1].old_turn : board.turn;
+            if (board.rollback[i].old_turn != next_turn) ++turns;
+        }
+        return turns;
+    }
+
+    static Move first_search_move(const Board& board) {
+        return board.rollback.empty() ? Move{} : board.rollback.front().move;
+    }
+
+    static void force_slot_collisions(Board& board) {
+        constexpr Hash mask = ~((Hash{1} << 20) - 1);
+        for (auto* table : {&board.piece_hash, &board.turn_hash,
+                            &board.move_left_hash, &board.castling_rights_hash})
+            for (auto& item : *table) item.second &= mask;
+        board.refresh_hash();
+    }
+};
+
+struct EngineTestAccess {
+    static void seed_root_lower(Engine& engine, const Board& board, const Move& witness) {
+        auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        entry.key = board.get_hash();
+        entry.score = 100;
+        entry.depth = 2;
+        entry.bound = static_cast<std::uint8_t>(Engine::BoundType::Lower);
+        entry.best_move = Engine::encode_move(witness);
+    }
+
+    static void weaken_root_to_lower_bound(Engine& engine, const Board& board) {
+        auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        if (entry.key != board.get_hash()) throw std::runtime_error("root TT key missing");
+        entry.score = -100;
+        entry.bound = static_cast<std::uint8_t>(Engine::BoundType::Lower);
+    }
+
+    static bool root_is_exact_zero(const Engine& engine, const Board& board) {
+        const auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        return entry.key == board.get_hash() && entry.score == 0 && entry.depth == 1
+            && entry.bound == static_cast<std::uint8_t>(Engine::BoundType::Exact)
+            && entry.best_move == Engine::encode_move(engine.get_best_move());
+    }
+
+    static Move cached_move(const Engine& engine, const Board& board) {
+        const auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        if (entry.key != board.get_hash()) throw std::runtime_error("root TT key missing");
+        return Engine::decode_move(entry.best_move);
+    }
 };
 
 namespace {
@@ -629,6 +682,182 @@ void test_independent_boards_share_position_hashes() {
             "independent boards must restore the fixed initial hash");
 }
 
+void test_tt_persistence_across_undo_and_new_game() {
+    Board board;
+    const Board initial_board = board;
+    Engine engine(0, 2);
+
+    require(engine.find_best_move(board, 2), "engine found no opening move");
+    const Move first_best = engine.get_best_move();
+    const auto cold_nodes = engine.get_search_nodes();
+
+    require(board.make_move(first_best), "engine opening move was rejected");
+    require(board.make_move(6, 3, 5, 3), "black quiet move 1 was rejected");
+    require(board.make_move(6, 4, 5, 4), "black quiet move 2 was rejected");
+    const Board after_black = board;
+    require(engine.find_best_move(after_black, 2), "engine found no second move");
+
+    require(engine.find_best_move(initial_board, 2),
+            "re-search of an undone position returned no move (warm-TT root bug)");
+    require(engine.get_best_move() == first_best,
+            "undo re-search must reproduce the cached root best move");
+
+    Board fresh_game;
+    require(EngineTestAccess::cached_move(engine, fresh_game) == first_best,
+            "an independent initial board must match the cached root key");
+    require(engine.find_best_move(fresh_game, 2),
+            "engine found no move when reusing the TT in a new game");
+    require(engine.get_best_move() == first_best && engine.get_search_nodes() < cold_nodes,
+            "new-game search must retain and reuse the cached result");
+
+}
+
+void test_search_completes_shallow_iterations_before_final_depth() {
+    class DepthRecordingEvaluator final : public Evaluator {
+        std::vector<int>& depths;
+    public:
+        explicit DepthRecordingEvaluator(std::vector<int>& depths) : depths(depths) {}
+        int evaluate(const Board& board) const override {
+            depths.push_back(BoardTestAccess::searched_turns(board, 0));
+            return 0;
+        }
+    };
+
+    Board board;
+    const Board before = board;
+    std::vector<int> depths;
+    Engine engine(0, 2, std::make_unique<DepthRecordingEvaluator>(depths));
+    require(engine.find_best_move(board), "iterative search found no opening move");
+    require(std::find(depths.begin(), depths.end(), 1) != depths.end(),
+            "search skipped the depth-1 iteration before depth 2");
+    require(std::find(depths.begin(), depths.end(), 2) != depths.end(),
+            "search reused shallow scores instead of reaching depth 2");
+    require(same_board(board, before), "iterative search mutated the root");
+}
+
+void test_shallow_tt_move_orders_deeper_search_without_reusing_its_score() {
+    const Move shallow_best{1, 0, 2, 0};
+    const Move deep_best{1, 1, 2, 1};
+    class HorizonEvaluator final : public Evaluator {
+        Move shallow_best;
+        Move deep_best;
+        Move& first_deep_move;
+    public:
+        HorizonEvaluator(Move shallow, Move deep, Move& first_deep)
+            : shallow_best(shallow), deep_best(deep), first_deep_move(first_deep) {}
+        int evaluate(const Board& board) const override {
+            const int depth = BoardTestAccess::searched_turns(board, 0);
+            const Move first = BoardTestAccess::first_search_move(board);
+            if (depth == 2 && first_deep_move.old_x == -1) first_deep_move = first;
+            int white_score = first == shallow_best ? 100 : (first == deep_best ? -100 : 0);
+            if (depth >= 2) white_score = -white_score;
+            return board.get_current_turn() == 0 ? white_score : -white_score;
+        }
+    };
+
+    Board board;
+    Move first_deep_move{};
+    Engine engine(0, 2, std::make_unique<HorizonEvaluator>(
+        shallow_best, deep_best, first_deep_move));
+    require(engine.find_best_move(board, 1), "shallow search found no move");
+    require(engine.get_best_move() == shallow_best, "shallow fixture chose the wrong move");
+    require(engine.find_best_move(board, 2), "deeper search found no move");
+    require(first_deep_move == shallow_best,
+            "depth-1 TT best move was not searched first at depth 2");
+    require(engine.get_best_move() == deep_best,
+            "depth-2 search reused the shallow score instead of finding the new best move");
+    require(engine.find_best_move(board, 2) && engine.get_best_move() == deep_best,
+            "warm iterative re-search lost the final-depth best move");
+}
+
+int exhaustive_score(Board& board, const Evaluator& evaluator, int depth, int target) {
+    if (board.has_game_ended() || (board.get_moves_left() == 2 && depth >= target))
+        return evaluator.evaluate(board);
+    const int turn = board.get_current_turn();
+    int best = NEGINF;
+    for (const Move& move : board.legal_moves()) {
+        require(board.make_move(move), "oracle rejected a generated move");
+        const bool changed = board.get_current_turn() != turn;
+        const int score = exhaustive_score(board, evaluator, depth + (changed ? 1 : 0), target);
+        best = std::max(best, changed ? -score : score);
+        board.rollback_move();
+    }
+    return best == NEGINF ? evaluator.evaluate(board) : best;
+}
+
+void test_iterative_search_matches_exhaustive_final_depth() {
+    for (int side : {0, 1}) {
+        for (int actions : {1, 2}) {
+            Board board;
+            BoardTestAccess::empty(board, side, actions, 0);
+            BoardTestAccess::set_piece(board, 1, 0, 6);
+            BoardTestAccess::set_piece(board, 6, 7, -6);
+            BoardTestAccess::set_piece(board, 3, 3, 1);
+            BoardTestAccess::set_piece(board, 4, 4, -1);
+            const Board before = board;
+            const auto history_size = BoardTestAccess::undo_size(board);
+            Engine engine(side, 3);
+            for (int target : {1, 2, 3, 3}) {
+                Board oracle = board;
+                const int expected = exhaustive_score(oracle, engine.get_evaluator(), 0, target);
+                require(engine.find_best_move(board, target), "iterative oracle fixture found no move");
+                Board selected = board;
+                require(selected.make_move(engine.get_best_move()), "iterative search returned an illegal move");
+                const bool changed = selected.get_current_turn() != side;
+                const int child = exhaustive_score(selected, engine.get_evaluator(), changed ? 1 : 0, target);
+                require((changed ? -child : child) == expected,
+                        "iterative best move differs from exhaustive minimax at final depth");
+                require(same_board(board, before) && BoardTestAccess::undo_size(board) == history_size,
+                        "iterative search altered root state or undo history");
+            }
+        }
+    }
+}
+
+void test_equal_depth_result_replaces_cached_lower_bound() {
+    Board board;
+    Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
+    require(engine.find_best_move(board, 1), "first equal-depth search found no move");
+    EngineTestAccess::weaken_root_to_lower_bound(engine, board);
+    require(engine.find_best_move(board, 1), "equal-depth re-search found no move");
+    require(EngineTestAccess::root_is_exact_zero(engine, board),
+            "equal-depth result must replace the cached lower bound with its exact result");
+}
+
+void test_retained_lower_bound_keeps_its_move_witness() {
+    class BoundWitnessEvaluator final : public Evaluator {
+    public:
+        int evaluate(const Board& board) const override {
+            const bool move_a = board.get_piece(2, 0) == 1;
+            const bool move_b = board.get_piece(2, 1) == 1;
+            if (board.get_current_turn() == 1)
+                return -(move_a ? 200 : (move_b ? 100 : -200));
+            return move_a ? (board.get_piece(6, 1) == -1 ? 100 : 0)
+                          : (move_b ? 100 : -200);
+        }
+    };
+
+    Board board;
+    const Move witness{1, 1, 2, 1};
+    Engine engine(0, 2, std::make_unique<BoundWitnessEvaluator>());
+    Board oracle = board;
+    require(exhaustive_score(oracle, engine.get_evaluator(), 0, 2) == 100,
+            "retained lower-bound fixture has an invalid score");
+    EngineTestAccess::seed_root_lower(engine, board, witness);
+    require(engine.find_best_move(board, 2), "bound-witness search found no move");
+    require(engine.get_best_move() == witness,
+            "shallow iteration corrupted the deeper lower-bound move witness");
+}
+
+void test_colliding_children_cannot_corrupt_the_root_tt_move() {
+    Board board;
+    BoardTestAccess::force_slot_collisions(board);
+    Engine engine(0, 2, std::make_unique<FixedEvaluator>(0));
+    require(engine.find_best_move(board, 2), "forced-collision search found no move");
+    require(EngineTestAccess::cached_move(engine, board) == engine.get_best_move(),
+            "recursive slot collision stored another position's move under the root key");
+}
+
 } // namespace
 
 int main() {
@@ -640,13 +869,20 @@ int main() {
         test_new_evaluator_is_injectable();
         test_search_does_not_mutate_position();
         test_move_rollback_restores_hash();
-        test_independent_boards_share_position_hashes();
         test_castling_and_rights();
         test_promotion_and_metadata();
         test_move_generation_matches_exhaustive_scan();
         test_move_generation_on_reachable_positions();
         test_hash_consistency_for_move_types();
         test_engine_searches_special_moves_without_mutating_root();
+        test_independent_boards_share_position_hashes();
+        test_tt_persistence_across_undo_and_new_game();
+        test_search_completes_shallow_iterations_before_final_depth();
+        test_shallow_tt_move_orders_deeper_search_without_reusing_its_score();
+        test_iterative_search_matches_exhaustive_final_depth();
+        test_equal_depth_result_replaces_cached_lower_bound();
+        test_retained_lower_bound_keeps_its_move_witness();
+        test_colliding_children_cannot_corrupt_the_root_tt_move();
         std::cout << "Passed: Board/Engine ownership, two-engine turns, custom configurations, and state isolation.\n";
         return 0;
     } catch (const std::exception& error) {
