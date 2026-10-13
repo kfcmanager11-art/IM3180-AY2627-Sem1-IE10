@@ -15,6 +15,8 @@ add_library(chess_core STATIC
     engine.hpp
     Engines/NewEvaluator.cpp
     Engines/NewEvaluator.hpp
+    Engines/SecondEvaluator.cpp
+    Engines/SecondEvaluator.hpp
 )
 target_include_directories(chess_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(chess_core PUBLIC cxx_std_17)
