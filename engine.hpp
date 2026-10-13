@@ -5,8 +5,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <deque>
+#include <vector>
 
 class Engine {
     friend struct EngineTestAccess;
@@ -29,7 +31,8 @@ class Engine {
 
     static std::uint32_t encode_move(const Move& move);
     static Move decode_move(std::uint32_t packed);
-    std::vector<Move> order_moves(Board& board, std::uint32_t tt_best) const;
+    std::vector<Move> order_moves(Board& board, std::uint32_t tt_best,
+        const std::array<std::uint32_t, 2>* killers = nullptr) const;
 
     int side;
     int default_search_depth;
@@ -38,12 +41,14 @@ class Engine {
     std::size_t search_nodes = 0;
     std::size_t closed_window_nodes = 0;
     std::unique_ptr<TranspositionEntry[]> transposition;
+    std::vector<std::array<std::uint32_t, 2>> killer_moves;
 
     static constexpr int kMaxQuiescencePly = 8;
     int quiescence_search(Board& board, int alpha, int beta, int capture_ply);
 
     int negamax_search(Board& board, int depth, int max_depth,
-                       int alpha, int beta, Move* root_move = nullptr);
+                       int alpha, int beta, Move* root_move = nullptr,
+                       std::size_t action_ply = 0);
 
     std::deque<std::pair<int,Hash>> evaluation_cache;
 

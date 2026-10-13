@@ -77,7 +77,8 @@ Move Engine::decode_move(std::uint32_t packed) {
 }
 
 std::vector<Move> Engine::order_moves(Board& board,
-                                      std::uint32_t tt_best) const {
+                                      std::uint32_t tt_best,
+                                      const std::array<std::uint32_t, 2>* killers) const {
     const std::vector<Move> legal = board.legal_moves();
     const std::size_t n = legal.size();
 
@@ -85,24 +86,38 @@ std::vector<Move> Engine::order_moves(Board& board,
     // config, so a king capture sorts to the very top).
     constexpr int piece_value[7] = {0, 1, 3, 3, 5, 9, 99999};
 
-    // Score each move: MVV-LVA for captures, 0 for quiet moves.
+    // Within-category priority: MVV-LVA for captures, recency for killers.
     std::vector<int> scores(n, 0);
+    std::vector<int> categories(n, 0);
     for (std::size_t i = 0; i < n; ++i) {
         const Move& move = legal[i];
         const int victim = board.get_piece(move.new_x, move.new_y);
-        if (victim == 0) continue;
+        if (victim == 0) {
+            if (killers && move.special_move < SpecialMove::PromoteQueen) {
+                const auto packed = encode_move(move);
+                for (std::size_t slot = 0; slot < killers->size(); ++slot) {
+                    if (packed == (*killers)[slot]) {
+                        categories[i] = 1;
+                        scores[i] = static_cast<int>(killers->size() - slot);
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        categories[i] = 2;
         const int attacker = board.get_piece(move.old_x, move.old_y);
         scores[i] = piece_value[std::abs(victim)] * 8 -
                     piece_value[std::abs(attacker)];
     }
 
-    // Stable index sort: highest score first; quiet moves and equal scores
-    // keep board order, so tie-breaking stays deterministic.
+    // Stable category/MVV-LVA sort preserves board order for ties.
     std::vector<std::size_t> idx(n);
     for (std::size_t i = 0; i < n; ++i) idx[i] = i;
     std::stable_sort(idx.begin(), idx.end(),
-                     [&scores](std::size_t a, std::size_t b) {
-                         return scores[a] > scores[b];
+                     [&scores, &categories](std::size_t a, std::size_t b) {
+                         return categories[a] != categories[b]
+                             ? categories[a] > categories[b] : scores[a] > scores[b];
                      });
 
     std::vector<Move> moves(n);
@@ -113,7 +128,7 @@ std::vector<Move> Engine::order_moves(Board& board,
         const Move best = decode_move(tt_best);
         for (std::size_t i = 0; i < n; ++i) {
             if (moves[i] == best) {
-                std::swap(moves[0], moves[i]);
+                std::rotate(moves.begin(), moves.begin() + i, moves.begin() + i + 1);
                 break;
             }
         }
@@ -158,7 +173,7 @@ int Engine::quiescence_search(Board& board, int alpha, int beta, int capture_ply
 }
 
 int Engine::negamax_search(Board& board, int depth, int max_depth,
-                           int alpha, int beta, Move* root_move) {
+                           int alpha, int beta, Move* root_move, std::size_t action_ply) {
     ++search_nodes;
     if (alpha >= beta) ++closed_window_nodes;
 
@@ -195,8 +210,8 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
     bool found_move = false;
     const int turn_before = board.get_current_turn();
 
-    // TT best move first, then captures by MVV-LVA, then quiet moves.
-    const std::vector<Move> moves = order_moves(board, tt_best);
+    const std::vector<Move> moves = order_moves(board, tt_best,
+        action_ply < killer_moves.size() ? &killer_moves[action_ply] : nullptr);
 
     for (const Move& move : moves) {
         if (!board.make_move(move)) continue;
@@ -206,24 +221,24 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
         if (turn_changed) {
             if (!found_move) {
                 child_score = -negamax_search(board, depth + 1, max_depth,
-                                              -beta, -alpha, nullptr);
+                                              -beta, -alpha, nullptr, action_ply + 1);
             } else {
                 child_score = -negamax_search(board, depth + 1, max_depth,
-                                              -alpha - 1, -alpha, nullptr);
+                                              -alpha - 1, -alpha, nullptr, action_ply + 1);
                 if (alpha < child_score && child_score < beta)
                     child_score = -negamax_search(board, depth + 1, max_depth,
-                                                  -beta, -child_score, nullptr);
+                                                  -beta, -child_score, nullptr, action_ply + 1);
             }
         } else {
             if (!found_move) {
                 child_score = negamax_search(board, depth, max_depth,
-                                             alpha, beta, nullptr);
+                                             alpha, beta, nullptr, action_ply + 1);
             } else {
                 child_score = negamax_search(board, depth, max_depth,
-                                             alpha, alpha + 1, nullptr);
+                                             alpha, alpha + 1, nullptr, action_ply + 1);
                 if (alpha < child_score && child_score < beta)
                     child_score = negamax_search(board, depth, max_depth,
-                                                 alpha, beta, nullptr);
+                                                 alpha, beta, nullptr, action_ply + 1);
             }
         }
 
@@ -236,7 +251,19 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
         alpha = std::max(alpha, child_score);
         board.rollback_move();
 
-        if (alpha >= beta) break;
+        if (alpha >= beta) {
+            if (board.get_piece(move.new_x, move.new_y) == 0 &&
+                move.special_move < SpecialMove::PromoteQueen) {
+                if (killer_moves.size() <= action_ply) killer_moves.resize(action_ply + 1);
+                auto& killers = killer_moves[action_ply];
+                const auto packed = encode_move(move);
+                if (killers[0] != packed) {
+                    killers[1] = killers[0];
+                    killers[0] = packed;
+                }
+            }
+            break;
+        }
     }
 
     if (!found_move) best_score = evaluate(board);
@@ -261,6 +288,7 @@ bool Engine::find_best_move(const Board& position, int requested_depth) {
     best_move = Move{};
     search_nodes = 0;
     closed_window_nodes = 0;
+    killer_moves.clear();
 
     if (!is_turn(position)) return false;
 

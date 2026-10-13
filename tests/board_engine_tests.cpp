@@ -1,6 +1,7 @@
 #include "../board.hpp"
 #include "../engine.hpp"
 #include "../Engines/NewEvaluator.hpp"
+#include "../Engines/SecondEvaluator.hpp"
 
 #include <iostream>
 #include <algorithm>
@@ -72,9 +73,43 @@ struct BoardTestAccess {
 };
 
 struct EngineTestAccess {
+    static int search_score(Engine& engine, Board& board, int target,
+                            int alpha, int beta, Move* root_move = nullptr) {
+        return engine.negamax_search(board, 0, target, alpha, beta, root_move);
+    }
+
+    static int search_score_at_ply(Engine& engine, Board& board, int target,
+                                   int alpha, int beta, std::size_t action_ply) {
+        return engine.negamax_search(board, 0, target, alpha, beta, nullptr, action_ply);
+    }
+
+    static std::vector<Move> ordered(Engine& engine, Board& board, std::size_t ply = 0,
+                                     const Move& tt_move = Move{}) {
+        return engine.order_moves(board, Engine::encode_move(tt_move),
+            ply < engine.killer_moves.size() ? &engine.killer_moves[ply] : nullptr);
+    }
+
+    static auto killers(const Engine& engine) { return engine.killer_moves; }
+
+    static void seed_killers(Engine& engine, std::size_t ply, const Move& first,
+                             const Move& second = Move{}) {
+        engine.killer_moves.resize(std::max(engine.killer_moves.size(), ply + 1));
+        engine.killer_moves[ply] = {Engine::encode_move(first), Engine::encode_move(second)};
+    }
+
+    static std::uint32_t packed(const Move& move) { return Engine::encode_move(move); }
+
     static int quiescence_score(Engine& engine, Board& board,
                                 int alpha = NEGINF, int beta = INF, int capture_ply = 0) {
         return engine.quiescence_search(board, alpha, beta, capture_ply);
+    }
+
+    static void seed_ordering_hint(Engine& engine, const Board& board, const Move& move) {
+        auto& entry = engine.transposition[board.get_hash() & Engine::kTTMask];
+        entry = {};
+        entry.key = board.get_hash();
+        entry.depth = 0;
+        entry.best_move = Engine::encode_move(move);
     }
 
     static int quiescence_limit() { return Engine::kMaxQuiescencePly; }
@@ -168,6 +203,283 @@ public:
 
     int evaluate(const Board&) const override { return score; }
 };
+
+bool same_board(const Board& left, const Board& right);
+
+class RootMoveRecordingEvaluator final : public Evaluator {
+    std::vector<Move>& moves;
+public:
+    explicit RootMoveRecordingEvaluator(std::vector<Move>& moves) : moves(moves) {}
+    int evaluate(const Board& board) const override {
+        moves.push_back(BoardTestAccess::first_search_move(board));
+        return 0;
+    }
+};
+
+void test_quiet_cutoff_orders_subsequent_same_ply_sibling() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 2);
+    BoardTestAccess::set_piece(board, 6, 7, -1);
+    const Move cutoff = board.legal_moves().back();
+    std::vector<Move> searched;
+    Engine engine(0, 1, std::make_unique<RootMoveRecordingEvaluator>(searched));
+    EngineTestAccess::seed_ordering_hint(engine, board, cutoff);
+    require(EngineTestAccess::search_score(engine, board, 1, NEGINF, 0) == 0,
+            "quiet cutoff fixture has the wrong score");
+    require(!searched.empty() && searched.front() == cutoff,
+            "TT hint did not drive the quiet cutoff fixture");
+    Board sibling = board;
+    BoardTestAccess::set_piece(sibling, 6, 7, 0);
+    BoardTestAccess::set_piece(sibling, 6, 6, -1);
+    require(sibling.legal_moves().front() != cutoff,
+            "killer fixture already has the cutoff move first");
+    searched.clear();
+    EngineTestAccess::search_score(engine, sibling, 1, NEGINF, 0);
+    require(!searched.empty() && searched.front() == cutoff,
+            "quiet cutoff was not searched first in a subsequent same-ply sibling");
+}
+
+void test_killer_recency_duplicate_slots_and_ply_isolation() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 2);
+    const auto legal = board.legal_moves();
+    const Move a = legal[legal.size() - 1];
+    const Move b = legal[legal.size() - 2];
+    const Move c = legal[legal.size() - 3];
+    Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
+    auto cutoff = [&](const Move& move, std::size_t ply = 0) {
+        EngineTestAccess::seed_ordering_hint(engine, board, move);
+        require(EngineTestAccess::search_score_at_ply(engine, board, 1, NEGINF, 0, ply) == 0,
+                "recency fixture failed to cut off");
+    };
+    cutoff(a);
+    cutoff(b);
+    cutoff(b);
+    require(EngineTestAccess::killers(engine)[0] == std::array<std::uint32_t, 2>{
+                EngineTestAccess::packed(b), EngineTestAccess::packed(a)},
+            "duplicate cutoff must preserve the distinct second killer");
+    cutoff(a);
+    cutoff(c);
+    require(EngineTestAccess::killers(engine)[0] == std::array<std::uint32_t, 2>{
+                EngineTestAccess::packed(c), EngineTestAccess::packed(a)},
+            "killers must move to front and evict the least recent distinct move");
+    std::vector<Move> expected{c, a};
+    for (const Move& move : legal) if (move != c && move != a) expected.push_back(move);
+    require(EngineTestAccess::ordered(engine, board) == expected,
+            "first/second killers or remaining quiet stability are wrong");
+    require(EngineTestAccess::ordered(engine, board, 1) == legal,
+            "a killer leaked into another action ply");
+    const auto before = EngineTestAccess::killers(engine);
+    require(EngineTestAccess::ordered(engine, board, 4096) == legal &&
+                EngineTestAccess::killers(engine) == before,
+            "unallocated killer reads must be safe and must not grow storage");
+    cutoff(b, 4096);
+    require(EngineTestAccess::killers(engine).size() == 4097 &&
+                EngineTestAccess::ordered(engine, board, 4096).front() == b &&
+                EngineTestAccess::ordered(engine, board) == expected,
+            "killer recording must grow lazily without a fixed ply cap or cross-ply mutation");
+}
+
+void test_recursive_killers_use_true_action_ply() {
+    for (int actions : {1, 2}) {
+        Board board;
+        BoardTestAccess::empty(board, 0, actions, 0);
+        BoardTestAccess::set_piece(board, 3, 3, 1);
+        BoardTestAccess::set_piece(board, 6, 7, -1);
+        const Board before = board;
+        Engine engine(0, 2, std::make_unique<FixedEvaluator>(0));
+        EngineTestAccess::search_score(engine, board, actions == 2 ? 1 : 2,
+                                      actions == 2 ? -1 : 0, actions == 2 ? 0 : 1);
+        const auto killers = EngineTestAccess::killers(engine);
+        require(killers.size() == static_cast<std::size_t>(actions == 2 ? 2 : 3),
+                "recursive cutoff used completed-turn depth instead of true action ply");
+        if (actions == 2) {
+            require(killers[0][0] == EngineTestAccess::packed(Move{3, 3, 4, 3}) &&
+                        killers[1][0] == EngineTestAccess::packed(Move{4, 3, 5, 3}),
+                    "same-turn first/second actions must occupy separate killer plies");
+        } else {
+            require(killers[0][0] == 0 &&
+                        killers[1][0] == EngineTestAccess::packed(Move{6, 7, 5, 7}) &&
+                        killers[2][0] == EngineTestAccess::packed(Move{5, 7, 4, 7}),
+                    "turn-changing action must advance ply before the opponent's two actions");
+        }
+        require(same_board(board, before) && BoardTestAccess::undo_size(board) == 0,
+                "recursive killer fixture did not restore its root");
+    }
+}
+
+void test_public_root_clears_killers_before_ordering() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 2);
+    BoardTestAccess::set_piece(board, 6, 7, -1);
+    const auto legal = board.legal_moves();
+    std::vector<Move> searched;
+    Engine engine(0, 1, std::make_unique<RootMoveRecordingEvaluator>(searched));
+    EngineTestAccess::seed_killers(engine, 0, legal.back());
+    EngineTestAccess::seed_killers(engine, 4096, legal.back());
+    require(engine.find_best_move(board, 1), "root-reset fixture found no move");
+    require(!searched.empty() && searched.front() == legal.front() &&
+                EngineTestAccess::killers(engine).empty(),
+            "public root must discard prior killers before ordering, not after search");
+    EngineTestAccess::seed_killers(engine, 3, legal.back());
+    Board wrong_turn;
+    BoardTestAccess::empty(wrong_turn, 1, 2, 0);
+    require(!engine.find_best_move(wrong_turn) && EngineTestAccess::killers(engine).empty(),
+            "wrong-turn public root must also clear prior killer hints");
+}
+
+void test_iterative_deepening_retains_killers_between_iterations() {
+    class RetentionEvaluator final : public Evaluator {
+        Engine*& engine;
+        bool& observed;
+        bool& retained;
+    public:
+        RetentionEvaluator(Engine*& engine, bool& observed, bool& retained)
+            : engine(engine), observed(observed), retained(retained) {}
+        int evaluate(const Board& board) const override {
+            if (!observed && BoardTestAccess::searched_turns(board, 0) == 3) {
+                observed = true;
+                const auto killers = EngineTestAccess::killers(*engine);
+                retained = std::any_of(killers.begin(), killers.end(), [](const auto& slots) {
+                    return slots[0] != 0;
+                });
+            }
+            return 0;
+        }
+    };
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 2);
+    BoardTestAccess::set_piece(board, 6, 7, -1);
+    Engine* pointer = nullptr;
+    bool observed = false, retained = false;
+    Engine engine(0, 3, std::make_unique<RetentionEvaluator>(pointer, observed, retained));
+    pointer = &engine;
+    require(engine.find_best_move(board, 3), "iterative-retention fixture found no move");
+    require(observed && retained,
+            "first depth-three leaf must still see killers recorded by shallower iterations");
+}
+
+void test_killer_recording_excludes_captures_and_promotions() {
+    for (int side : {0, 1}) {
+        const int sign = side == 0 ? 1 : -1;
+        for (const auto promotion : {SpecialMove::PromoteQueen, SpecialMove::PromoteRook,
+                                     SpecialMove::PromoteBishop, SpecialMove::PromoteKnight}) {
+            for (bool capture : {false, true}) {
+                Board board;
+                BoardTestAccess::empty(board, side, capture ? 2 : 1, 0);
+                const int from = side == 0 ? 6 : 1, to = side == 0 ? 7 : 0;
+                BoardTestAccess::set_piece(board, from, 3, sign);
+                if (capture) BoardTestAccess::set_piece(board, to, 4, -sign * 4);
+                const Move cutoff{from, 3, to, capture ? 4 : 3, promotion};
+                Engine engine(side, 1, std::make_unique<FixedEvaluator>(0));
+                EngineTestAccess::seed_ordering_hint(engine, board, cutoff);
+                require(EngineTestAccess::search_score(engine, board, 1, -1, 0) == 0,
+                        "promotion cutoff fixture has the wrong score");
+                require(EngineTestAccess::killers(engine).empty(),
+                        "quiet or capture promotion was recorded as a killer");
+                const auto normal = EngineTestAccess::ordered(engine, board);
+                EngineTestAccess::seed_killers(engine, 0, cutoff);
+                require(EngineTestAccess::ordered(engine, board) == normal,
+                        "a stale promotion hint was promoted by killer ordering");
+            }
+        }
+        Board board;
+        BoardTestAccess::empty(board, side, 2, 0);
+        BoardTestAccess::set_piece(board, 3, 3, sign * 2);
+        BoardTestAccess::set_piece(board, 5, 4, -sign);
+        const Move capture{3, 3, 5, 4};
+        Engine engine(side, 1, std::make_unique<FixedEvaluator>(0));
+        EngineTestAccess::seed_killers(engine, 0, Move{3, 3, 1, 2});
+        const auto before = EngineTestAccess::killers(engine);
+        EngineTestAccess::seed_ordering_hint(engine, board, capture);
+        require(EngineTestAccess::search_score(engine, board, 1, -1, 0) == 0 &&
+                    EngineTestAccess::killers(engine) == before,
+                "ordinary capture cutoff changed the killer slots");
+    }
+}
+
+void test_quiet_castling_can_be_a_killer() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1);
+    BoardTestAccess::set_piece(board, 0, 3, 6);
+    BoardTestAccess::set_piece(board, 0, 7, 4);
+    const Move castle{0, 3, 0, 5, SpecialMove::CastleKingside};
+    Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
+    EngineTestAccess::seed_ordering_hint(engine, board, castle);
+    EngineTestAccess::search_score(engine, board, 1, -1, 0);
+    require(EngineTestAccess::killers(engine).size() == 1 &&
+                EngineTestAccess::ordered(engine, board).front() == castle,
+            "quiet castling cutoff must be eligible for killer ordering");
+}
+
+void test_stale_killer_hints_do_not_promote_illegal_or_capturing_moves() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 6);
+    BoardTestAccess::set_piece(board, 2, 2, 2);
+    BoardTestAccess::set_piece(board, 4, 3, -4);
+    const Move king_capture{3, 3, 4, 3};
+    Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
+    const auto normal = EngineTestAccess::ordered(engine, board);
+    EngineTestAccess::seed_killers(engine, 0, king_capture, Move{2, 2, 7, 7});
+    require(EngineTestAccess::ordered(engine, board) == normal,
+            "stale capturing/illegal killers must not change normal ordering");
+    const Move quiet = normal.back();
+    EngineTestAccess::seed_killers(engine, 0, Move{2, 2, 7, 7}, quiet);
+    auto expected = normal;
+    const auto place = std::find(expected.begin(), expected.end(), quiet);
+    const auto first_quiet = std::find_if(expected.begin(), expected.end(), [&](const Move& move) {
+        return board.get_piece(move.new_x, move.new_y) == 0;
+    });
+    std::rotate(first_quiet, place, place + 1);
+    require(EngineTestAccess::ordered(engine, board) == expected,
+            "illegal first killer must not suppress a valid second killer or add an illegal move");
+}
+
+void test_tt_capture_killer_precedence_and_stability() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 3, 3, 6);
+    BoardTestAccess::set_piece(board, 2, 2, 2);
+    BoardTestAccess::set_piece(board, 4, 3, -4);
+    BoardTestAccess::set_piece(board, 4, 1, -4);
+    const auto legal = board.legal_moves();
+    std::vector<Move> captures, quiet;
+    for (const Move& move : legal)
+        (board.get_piece(move.new_x, move.new_y) ? captures : quiet).push_back(move);
+    constexpr int values[] = {0, 1, 3, 3, 5, 9, 99999};
+    auto mvv = [&](const Move& move) {
+        return values[std::abs(board.get_piece(move.new_x, move.new_y))] * 8 -
+            values[std::abs(board.get_piece(move.old_x, move.old_y))];
+    };
+    std::stable_sort(captures.begin(), captures.end(), [&](const Move& a, const Move& b) {
+        return mvv(a) > mvv(b);
+    });
+    require(captures.size() >= 3 && mvv(captures.back()) < 0 && quiet.size() >= 3,
+            "ordering fixture must include equal captures and a negative-MVV king capture");
+    const Move first = quiet.back(), second = quiet[quiet.size() - 2], tt = quiet[1];
+    Engine engine(0, 1, std::make_unique<FixedEvaluator>(0));
+    EngineTestAccess::seed_killers(engine, 0, first, second);
+    auto expected = captures;
+    expected.push_back(first);
+    expected.push_back(second);
+    for (const Move& move : quiet) if (move != first && move != second) expected.push_back(move);
+    require(EngineTestAccess::ordered(engine, board) == expected,
+            "captures must precede both killers even with negative MVV; ties and rest must be stable");
+    for (const Move& hint : {tt, second, captures.back()}) {
+        auto with_tt = expected;
+        const auto place = std::find(with_tt.begin(), with_tt.end(), hint);
+        std::rotate(with_tt.begin(), place, place + 1);
+        require(EngineTestAccess::ordered(engine, board, 0, hint) == with_tt,
+                "TT move must lead without displacing capture/killer/rest relative ordering");
+    }
+    require(EngineTestAccess::ordered(engine, board, 0, Move{2, 2, 7, 7}) == expected,
+            "illegal TT hint changed ordered legal moves");
+}
 
 class MaterialOnlyEvaluator final : public Evaluator {
 public:
@@ -901,6 +1213,154 @@ int exhaustive_score(Board& board, const Evaluator& evaluator, int depth, int ta
     return best == NEGINF ? evaluator.evaluate(board) : best;
 }
 
+template<class Evaluation>
+void require_pvs_matches_minimax(Board board, int target, const std::string& context) {
+    const Board before = board;
+    const auto history_size = BoardTestAccess::undo_size(board);
+    const int side = board.get_current_turn();
+    const Evaluation evaluator;
+    Board oracle = board;
+    const int exact = exhaustive_score(oracle, evaluator, 0, target);
+    auto restored = [&] {
+        require(same_board(board, before) && BoardTestAccess::undo_size(board) == history_size,
+                context + ": search changed root state or undo history");
+        require_hash_matches_recomputed(board, context);
+    };
+    auto optimal = [&](const Move& move, const std::string& phase) {
+        Board selected = board;
+        require(selected.make_move(move), context + phase + ": illegal root move");
+        const bool changed = selected.get_current_turn() != side;
+        const int child = exhaustive_score(selected, evaluator, changed ? 1 : 0, target);
+        require((changed ? -child : child) == exact,
+                context + phase + ": root move is not minimax-optimal");
+    };
+    // Fresh tables separate fail-low/high probes; each then becomes a warm root.
+    for (const auto window : {std::pair<int, int>{NEGINF, INF},
+                              {exact - 1, exact}, {exact, exact + 1},
+                              {exact - 1, exact + 1},
+                              {exact - 100, exact - 99}, {exact + 99, exact + 100}}) {
+        Engine engine(side, target, std::make_unique<Evaluation>());
+        Move move{};
+        const bool full_window = window.first == NEGINF && window.second == INF;
+        const std::string phase = " [" + std::to_string(window.first) + ","
+            + std::to_string(window.second) + "]";
+        const int actual = EngineTestAccess::search_score(
+            engine, board, target, window.first, window.second, full_window ? &move : nullptr);
+        require(exact <= window.first ? exact <= actual && actual <= window.first
+                : (exact >= window.second ? window.second <= actual && actual <= exact
+                                          : actual == exact),
+                context + phase + ": invalid score/bound, expected " + std::to_string(exact)
+                    + ", got " + std::to_string(actual));
+        restored();
+        if (full_window) optimal(move, phase);
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            move = Move{};
+            const int warm = EngineTestAccess::search_score(
+                engine, board, target, NEGINF, INF, &move);
+            require(warm == exact, context + phase + ": warm root score, expected "
+                    + std::to_string(exact) + ", got " + std::to_string(warm));
+            restored();
+            optimal(move, phase + " warm");
+        }
+        require(engine.find_best_move(board, target), context + phase + ": no iterative move");
+        restored();
+        optimal(engine.get_best_move(), phase + " iterative");
+    }
+}
+
+void test_killer_ordered_search_matches_independent_minimax() {
+    for (int side : {0, 1}) {
+        for (int actions : {1, 2}) {
+            Board board;
+            BoardTestAccess::empty(board, side, actions, 0);
+            BoardTestAccess::set_piece(board, 1, 0, 6);
+            BoardTestAccess::set_piece(board, 6, 7, -6);
+            BoardTestAccess::set_piece(board, 3, 3, 1);
+            BoardTestAccess::set_piece(board, 4, 4, -1);
+            const std::string context = "killer SecondEvaluator side " + std::to_string(side)
+                + ", actions " + std::to_string(actions);
+            const SecondEvaluator evaluator;
+            Board oracle = board;
+            const int exact = exhaustive_score(oracle, evaluator, 0, 2);
+            Engine engine(side, 2, std::make_unique<SecondEvaluator>());
+            std::vector<Move> quiet;
+            for (const Move& move : board.legal_moves())
+                if (board.get_piece(move.new_x, move.new_y) == 0 &&
+                    move.special_move < SpecialMove::PromoteQueen) quiet.push_back(move);
+            require(quiet.size() >= 2, context + ": not enough quiet candidates");
+            const auto normal_order = EngineTestAccess::ordered(engine, board);
+            EngineTestAccess::seed_killers(engine, 0, quiet.back(), quiet[quiet.size() - 2]);
+            require(EngineTestAccess::ordered(engine, board) != normal_order,
+                    context + ": seeded killers did not alter traversal");
+            const Board before = board;
+            Move selected{};
+            require(EngineTestAccess::search_score(engine, board, 2, NEGINF, INF, &selected) == exact,
+                    context + ": killer-ordered score differs from independent minimax");
+            Board child = board;
+            require(child.make_move(selected), context + ": selected move is illegal");
+            const bool changed = child.get_current_turn() != side;
+            const int score = exhaustive_score(child, evaluator, changed ? 1 : 0, 2);
+            require((changed ? -score : score) == exact && same_board(board, before) &&
+                        BoardTestAccess::undo_size(board) == 0,
+                    context + ": nonoptimal move or mutated root");
+            require_pvs_matches_minimax<SecondEvaluator>(board, 2, context);
+        }
+    }
+}
+
+void test_quiescence_does_not_consume_or_change_killer_hints() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 3, 0, 5);
+    BoardTestAccess::set_piece(board, 3, 4, -4);
+    BoardTestAccess::set_piece(board, 4, 5, -1);
+    const Board before = board;
+    std::vector<Move> normal, with_killers;
+    Engine fresh(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(normal));
+    const int expected = EngineTestAccess::quiescence_score(fresh, board);
+    Engine engine(0, 1, std::make_unique<CaptureOnlyRecordingEvaluator>(with_killers));
+    EngineTestAccess::seed_killers(engine, 0, Move{3, 0, 3, 4}, Move{3, 0, 2, 0});
+    EngineTestAccess::seed_killers(engine, 1, Move{4, 5, 3, 4});
+    const auto killers = EngineTestAccess::killers(engine);
+    for (const auto window : {std::pair<int, int>{NEGINF, INF}, {-1000, 0}, {0, 1}}) {
+        with_killers.clear();
+        const int actual = EngineTestAccess::quiescence_score(
+            engine, board, window.first, window.second);
+        require(EngineTestAccess::killers(engine) == killers && same_board(board, before) &&
+                    BoardTestAccess::undo_size(board) == 0 && EngineTestAccess::tt_is_empty(engine),
+                "capture-only quiescence changed killer hints, TT, or root state");
+        if (window.first == NEGINF)
+            require(actual == expected && with_killers == normal,
+                    "quiescence score or capture visitation changed with populated killer hints");
+    }
+}
+
+void test_pvs_turn_changed_research_matches_minimax() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 1, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 2, 2, 2);
+    BoardTestAccess::set_piece(board, 4, 3, -2);
+    require_pvs_matches_minimax<NewEvaluator>(board, 1, "PVS turn-changed NewEvaluator");
+    require_pvs_matches_minimax<StandardEvaluator>(board, 1, "PVS turn-changed StandardEvaluator");
+    require_pvs_matches_minimax<SecondEvaluator>(board, 1, "PVS turn-changed SecondEvaluator");
+}
+
+void test_pvs_same_turn_research_matches_minimax() {
+    Board board;
+    BoardTestAccess::empty(board, 0, 2, 0);
+    BoardTestAccess::set_piece(board, 0, 0, 6);
+    BoardTestAccess::set_piece(board, 7, 7, -6);
+    BoardTestAccess::set_piece(board, 2, 2, 1);
+    BoardTestAccess::set_piece(board, 4, 3, -1);
+    require_pvs_matches_minimax<StandardEvaluator>(board, 2, "PVS same-turn StandardEvaluator");
+    require_pvs_matches_minimax<NewEvaluator>(board, 2, "PVS same-turn NewEvaluator");
+    require_pvs_matches_minimax<SecondEvaluator>(board, 2, "PVS same-turn SecondEvaluator");
+}
+
 void test_iterative_search_matches_exhaustive_final_depth() {
     for (int side : {0, 1}) {
         for (int actions : {1, 2}) {
@@ -1282,6 +1742,17 @@ void test_colliding_children_cannot_corrupt_the_root_tt_move() {
 
 int main() {
     try {
+        test_quiet_cutoff_orders_subsequent_same_ply_sibling();
+        test_killer_recency_duplicate_slots_and_ply_isolation();
+        test_recursive_killers_use_true_action_ply();
+        test_public_root_clears_killers_before_ordering();
+        test_iterative_deepening_retains_killers_between_iterations();
+        test_killer_recording_excludes_captures_and_promotions();
+        test_quiet_castling_can_be_a_killer();
+        test_stale_killer_hints_do_not_promote_illegal_or_capturing_moves();
+        test_tt_capture_killer_precedence_and_stability();
+        test_killer_ordered_search_matches_independent_minimax();
+        test_quiescence_does_not_consume_or_change_killer_hints();
         test_board_owns_rules_only();
         test_engines_take_turns_on_one_board();
         test_engine_configuration_is_independent();
@@ -1299,6 +1770,8 @@ int main() {
         test_tt_persistence_across_undo_and_new_game();
         test_search_completes_shallow_iterations_before_final_depth();
         test_shallow_tt_move_orders_deeper_search_without_reusing_its_score();
+        test_pvs_turn_changed_research_matches_minimax();
+        test_pvs_same_turn_research_matches_minimax();
         test_iterative_search_matches_exhaustive_final_depth();
         test_horizon_search_finds_free_rook_capture();
         test_quiescence_resolves_king_capture_before_stand_pat_or_limit();
