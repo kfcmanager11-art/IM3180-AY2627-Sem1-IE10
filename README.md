@@ -6,12 +6,16 @@ search engine.
 ## Build with CMake
 
 The default configuration builds the GUI and fetches SFML 3.0.2 during the
-CMake configure step. A machine with CMake, a C++17 compiler, Git, and network
-access for the first configure can therefore build the project from a fresh
-clone:
+CMake configure step. A machine with CMake, a C++17 compiler, Git, SQLite3
+headers/library, and network access for the first configure can build the project.
+On non-Windows systems, OpenSSL's Crypto library is also required for SHA-256.
+Windows uses the system BCrypt API.
+
+For MSYS2 UCRT64, install `mingw-w64-ucrt-x86_64-sqlite3` if SQLite is missing,
+and pass the toolchain prefix so CMake can locate it:
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/msys64/ucrt64
 cmake --build build --parallel
 ```
 
@@ -32,7 +36,7 @@ ctest --test-dir build --output-on-failure
 The core library and tests can be built without SFML:
 
 ```powershell
-cmake -S . -B build-core -G "MinGW Makefiles" -DCHESS_BUILD_GUI=OFF
+cmake -S . -B build-core -G "MinGW Makefiles" -DCHESS_BUILD_GUI=OFF -DCMAKE_PREFIX_PATH=C:/msys64/ucrt64
 cmake --build build-core --parallel
 ctest --test-dir build-core --output-on-failure
 ```
@@ -93,3 +97,36 @@ directly:
 ```cpp
 ChessUI ui(1, Engine::kDefaultSearchDepth); // default: Black, depth 3
 ```
+
+## Local accounts and match history
+
+Open the profile button at the top right of the main menu to sign up or sign in.
+Accounts and completed games persist in `data/chess.db` under the repository root
+used during CMake configuration. The directory is created on startup and ignored
+by Git. No database server is needed.
+
+The database has three tables:
+- `accounts`: unique username and plain SHA-256 password digest.
+- `games`: date, result, White/Black labels, and the selected main-line history.
+- `player_games`: username, game ID, and played side (`0` = White, `1` = Black).
+
+This is local project/demo authentication, not production password storage.
+Usernames are case-sensitive. The existing form accepts up to 40 characters per field.
+Sign-out clears the in-memory identity; accounts remain available after restart.
+
+Only matches started while signed in are recorded. Player-vs-Engine uses the chosen
+human side. Player-vs-Player records the single signed-in account as White and the
+other player as Guest. Guest games and Engine-vs-Engine are not assigned to an account.
+The identity is captured when the match starts, so changing accounts mid-game does
+not reassign its history.
+
+A completed match stores only the path to its terminal history node, not abandoned
+branches. Each history line contains five integers:
+`from_row from_col to_row to_col special_move`. Special-move codes use `SpecialMove`
+from `board.hpp`; every action is stored in order, including same-turn actions.
+Open Profile > Match History to fetch the signed-in account's games, newest first.
+The screen remains a summary list; replay is not implemented.
+
+CTest includes storage regressions and, with the GUI enabled, account/history UI
+integration tests. These use separate temporary databases inside the build directory,
+not the application's `data/chess.db`.

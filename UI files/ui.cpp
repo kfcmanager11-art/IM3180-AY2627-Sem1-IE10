@@ -1,6 +1,7 @@
 #include "ui.hpp"
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <optional>
@@ -189,6 +190,7 @@ bool ChessUI::applyMove(const Move& requested) {
     playSound(capturedPiece != 0 ? captureSoundBuffer : moveSoundBuffer);
 
     if (game.has_game_ended()) {
+        recordCompletedMatch();
         playSound(victorySoundBuffer);
         currentScreen = Screen::EndGame;
     }
@@ -465,7 +467,7 @@ void ChessUI::handleEvents() {
                 float mouseX = logicalMouse.x;
                 float mouseY = logicalMouse.y;
 
-                const bool profileButtonAvailable = currentScreen != Screen::StartScreen && currentScreen != Screen::MainMenu && currentScreen != Screen::Settings && currentScreen != Screen::Account && currentScreen != Screen::Promotion;
+                const bool profileButtonAvailable = currentScreen != Screen::StartScreen && currentScreen != Screen::Settings && currentScreen != Screen::Account && currentScreen != Screen::Promotion;
                 if (profileButtonAvailable && mouseX >= topProfileX && mouseX <= topProfileX + topProfileRadius * 2.f && mouseY >= 13.f && mouseY <= 13.f + topProfileRadius * 2.f) {
                     playSound(uiClickSoundBuffer);
                     accountReturnScreen = currentScreen;
@@ -523,18 +525,7 @@ void ChessUI::handleEvents() {
                         else if (mouseX >= 430.f && mouseX <= 770.f &&
                             mouseY >= 430.f && mouseY <= 482.f) {
                             playSound(uiClickSoundBuffer);
-                            matchHistoryReturnScreen = Screen::Account;
-                            matchHistoryScroll = 0.f;
-                            if (matchHistoryProvider) {
-                                try {
-                                    matchSummaries = matchHistoryProvider();
-                                    matchHistoryMessage.clear();
-                                }
-                                catch (...) {
-                                    matchSummaries.clear();
-                                }
-                            }
-                            currentScreen = Screen::MatchHistory;
+                            openMatchHistory();
                         }
                         else if (mouseX >= 430.f && mouseX <= 770.f &&
                                  mouseY >= 495.f && mouseY <= 547.f) {
@@ -1059,6 +1050,7 @@ void ChessUI::draw() {
 
     if (currentScreen == Screen::MainMenu) {
         drawMainMenu();
+        drawProfileButton();
         window.display();
         return;
     }
@@ -1527,9 +1519,7 @@ void ChessUI::drawAccountScreen() {
     modeText.setFillColor(sf::Color::White);
     window.draw(modeText);
 
-    const std::string status = !accountMessage.empty()
-        ? accountMessage
-        : (authHandler ? "" : "Default account: jarvis / jarvis1234");
+    const std::string status = accountMessage;
     sf::Text statusText(font, status, 14);
     statusText.setPosition({370.f, 487.f});
     statusText.setFillColor(accountMessage.empty()
@@ -1724,31 +1714,69 @@ void ChessUI::drawMatchHistoryScreen() {
     window.draw(backText);
 }
 
+void ChessUI::openMatchHistory() {
+    if (!accountSignedIn) return;
+    recordCompletedMatch();
+    matchHistoryReturnScreen = Screen::Account;
+    matchHistoryScroll = 0.f;
+    if (matchHistoryProvider) {
+        try {
+            matchSummaries = matchHistoryProvider(accountName);
+            matchHistoryMessage.clear();
+        } catch (...) {
+            matchSummaries.clear();
+            matchHistoryMessage = "Could not load local match history.";
+        }
+    }
+    currentScreen = Screen::MatchHistory;
+}
+
+void ChessUI::recordCompletedMatch() {
+    if (!game.has_game_ended() || gameRecorded || gameAccountName.empty() ||
+        gamePlayerSide < 0 || !matchRecorder) return;
+
+    MatchSummary summary;
+    summary.white = gamePlayerSide == 0 ? gameAccountName : "Engine";
+    summary.black = gamePlayerSide == 1 ? gameAccountName
+        : (gameMode == GameMode::PlayerVsPlayer ? "Guest" : "Engine");
+    summary.result = game.get_game_status() > 0 ? "1-0" : "0-1";
+    const auto now = std::time(nullptr);
+    if (const auto* date = std::localtime(&now)) {
+        std::ostringstream formatted;
+        formatted << std::put_time(date, "%Y-%m-%d");
+        summary.date = formatted.str();
+    }
+    std::vector<Move> mainline;
+    mainline.reserve(moveHistory.size());
+    for (const auto& entry : moveHistory)
+        mainline.push_back(entry.boardAfterMove.get_last_move());
+    try {
+        matchRecorder(gameAccountName, gamePlayerSide, summary, mainline);
+        gameRecorded = true;
+        matchSaveMessage.clear();
+    } catch (...) {
+        matchSaveMessage = "Could not save match history.";
+    }
+}
+
 void ChessUI::submitAccountForm() {
     if (accountInput.empty() || accountPassword.empty()) {
         accountMessage = "Enter both a username and password.";
         return;
     }
 
-    const bool defaultAccount = !accountSignUpMode &&
-        accountInput == "jarvis" && accountPassword == "jarvis1234";
-
-    if (!defaultAccount && !authHandler) {
-        accountMessage = accountSignUpMode
-            ? "The authentication service is not connected yet."
-            : "Use the default account: jarvis / jarvis1234.";
+    if (!authHandler) {
+        accountMessage = "Local accounts are not connected.";
         return;
     }
 
-    bool accepted = defaultAccount;
-    if (!defaultAccount) {
-        try {
-            accepted = authHandler(accountInput, accountPassword, accountSignUpMode);
-        }
-        catch (...) {
-            accountMessage = "The authentication service returned an error.";
-            return;
-        }
+    bool accepted = false;
+    try {
+        accepted = authHandler(accountInput, accountPassword, accountSignUpMode);
+    }
+    catch (...) {
+        accountMessage = "Could not access local accounts.";
+        return;
     }
 
     if (!accepted) {
@@ -2647,6 +2675,13 @@ void ChessUI::drawEndScreen() {
     message.setFillColor(sf::Color(210, 210, 210));
     window.draw(message);
 
+    if (!matchSaveMessage.empty()) {
+        sf::Text saveError(font, matchSaveMessage, 16);
+        saveError.setPosition({420.f, 390.f});
+        saveError.setFillColor(sf::Color(245, 170, 135));
+        window.draw(saveError);
+    }
+
     sf::RectangleShape playAgain({200.f, 65.f});
     playAgain.setPosition({390.f, 500.f});
     playAgain.setFillColor(sf::Color(70, 120, 75));
@@ -2964,6 +2999,11 @@ void ChessUI::startGame(int engineSide, GameMode mode) {
 
     this->engineSide = engineSide;
     gameMode = mode;
+    gameAccountName = accountSignedIn ? accountName : "";
+    gamePlayerSide = mode == GameMode::PlayerVsEngine ? 1 - engineSide
+        : (mode == GameMode::PlayerVsPlayer ? 0 : -1);
+    gameRecorded = false;
+    matchSaveMessage.clear();
     gameStarted = true;
     currentScreen = Screen::Game;
 
