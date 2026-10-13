@@ -204,11 +204,27 @@ int Engine::negamax_search(Board& board, int depth, int max_depth,
         bool turn_changed = board.get_current_turn() != turn_before;
         int child_score;
         if (turn_changed) {
-            child_score = -negamax_search(board, depth + 1, max_depth,
-                                          -beta, -alpha, nullptr);
+            if (!found_move) {
+                child_score = -negamax_search(board, depth + 1, max_depth,
+                                              -beta, -alpha, nullptr);
+            } else {
+                child_score = -negamax_search(board, depth + 1, max_depth,
+                                              -alpha - 1, -alpha, nullptr);
+                if (alpha < child_score && child_score < beta)
+                    child_score = -negamax_search(board, depth + 1, max_depth,
+                                                  -beta, -child_score, nullptr);
+            }
         } else {
-            child_score = negamax_search(board, depth, max_depth,
-                                         alpha, beta, nullptr);
+            if (!found_move) {
+                child_score = negamax_search(board, depth, max_depth,
+                                             alpha, beta, nullptr);
+            } else {
+                child_score = negamax_search(board, depth, max_depth,
+                                             alpha, alpha + 1, nullptr);
+                if (alpha < child_score && child_score < beta)
+                    child_score = negamax_search(board, depth, max_depth,
+                                                 alpha, beta, nullptr);
+            }
         }
 
         if (!found_move || child_score > best_score) {
