@@ -19,6 +19,8 @@ struct BoardTestAccess {
         board.turn = side_to_move;
         board.move_left = moves_left;
         board.game_status = 0;
+        board.halfmove_clock = 0;
+        board.fullmove_number = 1;
         board.castling_rights = rights;
         board.rollback.clear();
         board.last_move = Move{};
@@ -37,6 +39,25 @@ struct BoardTestAccess {
 
     static Hash recomputed_hash(const Board& board) {
         return board.calculate_hash();
+    }
+
+    static auto counters(const Board& board) {
+        return std::make_pair(board.halfmove_clock, board.fullmove_number);
+    }
+
+    static void customize_patterns(Board& board) {
+        board.move_pattern[2] = {{1, 0}};
+        board.pawn_move_pattern[1] = {{2, 0}};
+        board.pawn_capture_pattern[1] = {{2, 1}};
+    }
+
+    static bool same_tables(const Board& left, const Board& right) {
+        return left.piece_hash == right.piece_hash && left.turn_hash == right.turn_hash
+            && left.move_left_hash == right.move_left_hash
+            && left.castling_rights_hash == right.castling_rights_hash
+            && left.move_pattern == right.move_pattern
+            && left.pawn_move_pattern == right.pawn_move_pattern
+            && left.pawn_capture_pattern == right.pawn_capture_pattern;
     }
 
     static std::size_t undo_size(const Board& board) {
@@ -215,6 +236,459 @@ public:
         return 0;
     }
 };
+
+void test_fen_initial_export() {
+    const Board board;
+    require(board.export_fen() ==
+                "rnbkqbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBKQBNR w KQkq 1 0 1",
+            "initial variant FEN must preserve the actual king/queen layout");
+}
+
+void test_fen_import_replaces_position_at_a_new_root() {
+    Board board;
+    require(board.make_move(1, 0, 2, 0), "import history fixture failed");
+    const std::string fen = "r2k3r/1p6/2n5/3q4/4B3/5N2/6P1/R2K3R b qK 2 17 42";
+    require(board.import_fen(fen), "valid variant FEN import was rejected");
+    require(board.export_fen() ==
+                "r2k3r/1p6/2n5/3q4/4B3/5N2/6P1/R2K3R b Kq 2 17 42",
+            "import must retain all six fields and normalize rights");
+    require(board.get_piece(7, 0) == -4 && board.get_piece(0, 3) == 6 &&
+                board.get_piece(3, 4) == 3 && board.get_piece(4, 3) == -5,
+            "import mapped a rank or piece incorrectly");
+    require(BoardTestAccess::undo_size(board) == 0 && board.get_last_move() == Move{},
+            "import must clear undo history and last move");
+    const auto hash = board.get_hash();
+    require(hash == BoardTestAccess::recomputed_hash(board), "import hash is stale");
+    const auto exported = board.export_fen();
+    const auto legal = board.legal_moves();
+    board.rollback_move();
+    require(board.export_fen() == exported && board.get_hash() == hash,
+            "rollback at imported root must be a no-op");
+    Board copy;
+    require(copy.import_fen(exported) && copy.get_hash() == hash && copy.legal_moves() == legal,
+            "independent import must reproduce hash and ordered legal moves");
+}
+
+void test_fen_rejects_malformed_input_transactionally() {
+    const std::string placement = "3k4/8/8/8/8/8/8/3K4";
+    const std::vector<std::string> invalid = {
+        placement + " w - 2 -1 1", placement + " w - 2 0 -1",
+        placement + " w - 2 +1 1", placement + " w - 2 0 +1",
+        placement + " w - 2 18446744073709551616 1",
+        placement + " w - 2 0 18446744073709551616",
+        placement + " w - 2 1x 1", placement + " w - 2 0 1x",
+        placement + " w - 2 0 0", placement + " w - 2 0 1 extra",
+        placement + " w - 2 0", "", placement,
+        placement + " W - 2 0 1", placement + " x - 2 0 1",
+        placement + " w KK 2 0 1", placement + " w K-K 2 0 1",
+        placement + " w X 2 0 1", placement + " w - 0 0 1",
+        placement + " w - 3 0 1", placement + " w - 01 0 1",
+        placement + " w - - 0 1", placement + " w - e3 0 1",
+        "3k4/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/8/8/8/8/8/8/8/3K4 w - 2 0 1",
+        "/3k4/8/8/8/8/8/8/3K4 w - 2 0 1",
+        placement + "/ w - 2 0 1",
+        "3k4//8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/9/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/0/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/44/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/7/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/8P/8/8/8/8/8/3K4 w - 2 0 1",
+        "3k4/7X/8/8/8/8/8/3K4 w - 2 0 1"
+    };
+    for (const auto& fen : invalid) {
+        Board board;
+        require(board.make_move(0, 1, 2, 2), "invalid-import history fixture failed");
+        const Board before = board;
+        const auto exported = board.export_fen();
+        const auto undo_size = BoardTestAccess::undo_size(board);
+        require(!board.import_fen(fen), "malformed FEN accepted: " + fen);
+        require(board.export_fen() == exported && board.get_hash() == before.get_hash() &&
+                    board.get_last_move() == before.get_last_move() &&
+                    board.get_game_status() == before.get_game_status() &&
+                    BoardTestAccess::undo_size(board) == undo_size,
+                "rejected import mutated state: " + fen);
+        Board expected = before;
+        board.rollback_move();
+        expected.rollback_move();
+        require(board.export_fen() == expected.export_fen() &&
+                    board.get_hash() == expected.get_hash() &&
+                    board.get_last_move() == expected.get_last_move(),
+                "rejected import damaged existing rollback: " + fen);
+    }
+    Board board;
+    require(board.import_fen("\t" + placement + "  w\t- 2 00017 00042\n") &&
+                board.export_fen() == placement + " w - 2 17 42",
+            "valid whitespace and unsigned decimal counters must normalize");
+    require(board.import_fen(placement + " b - 1 18446744073709551615 18446744073709551615") &&
+                board.export_fen() == placement + " b - 1 18446744073709551615 18446744073709551615",
+            "uint64 maximum counters must round-trip");
+}
+
+void test_fen_quiet_action_counters_and_rollback() {
+    for (int side : {0, 1}) {
+        for (int actions : {1, 2}) {
+            for (bool maximum : {false, true}) {
+                Board board;
+                const std::string placement = side == 0
+                    ? "3k4/8/8/8/3N4/8/8/3K4" : "3k4/8/8/8/3n4/8/8/3K4";
+                const std::string count = maximum ? "18446744073709551615" : "9";
+                const std::string fen = placement + (side == 0 ? " w - " : " b - ")
+                    + std::to_string(actions) + " " + count + " " + count;
+                require(board.import_fen(fen), "quiet counter fixture import failed");
+                const auto hash = board.get_hash();
+                require(board.make_move(3, 3, 5, 4), "quiet counter move failed");
+                const int next_side = actions == 1 ? 1 - side : side;
+                const std::string half = maximum ? count : "10";
+                const std::string full = maximum ? count : (side == 1 && actions == 1 ? "10" : "9");
+                const std::string expected = (next_side == 0 ? " w - " : " b - ")
+                    + std::to_string(actions == 1 ? 2 : 1) + " " + half + " " + full;
+                const auto exported = board.export_fen();
+                require(exported.substr(exported.find(' ')) == expected,
+                        "quiet action counters must increment per action/black turn end and saturate");
+                require(board.get_hash() == BoardTestAccess::recomputed_hash(board),
+                        "counter update damaged incremental hash");
+                board.rollback_move();
+                require(board.export_fen() == fen && board.get_hash() == hash &&
+                            board.get_last_move() == Move{} && BoardTestAccess::undo_size(board) == 0,
+                        "rollback did not restore FEN counters");
+            }
+        }
+    }
+    Board board;
+    require(board.make_move(0, 1, 2, 2), "opening quiet counter move failed");
+    require(board.export_fen() ==
+                "rnbkqbnr/pppppppp/8/8/8/2N5/PPPPPPPP/R1BKQBNR b KQkq 2 1 1",
+            "opening white action must not increment fullmove number");
+    const auto before = board.export_fen();
+    require(board.make_move(7, 1, 5, 2) && board.make_move(7, 6, 5, 5),
+            "black two-action counter sequence failed");
+    require(board.export_fen() ==
+                "r1bkqb1r/pppppppp/2n2n2/8/8/2N5/PPPPPPPP/R1BKQBNR w KQkq 2 3 2",
+            "fullmove number must advance once after black's second action");
+    board.rollback_move();
+    board.rollback_move();
+    require(board.export_fen() == before, "multi-action counter rollback failed");
+}
+
+Hash independent_fixed_hash(const Board& board) {
+    Hash state = 0x31802627;
+    std::array<Hash, 852> keys;
+    for (auto& key : keys) {
+        state += 0x9e3779b97f4a7c15ULL;
+        Hash mixed = state;
+        mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebULL;
+        key = mixed ^ (mixed >> 31);
+    }
+    Hash result = 0;
+    for (int square = 0; square < 64; ++square)
+        result ^= keys[(board.get_piece(square / 8, square % 8) + 6) * 64 + square];
+    return result ^ keys[832 + board.get_current_turn()]
+        ^ keys[834 + board.get_moves_left() - 1] ^ keys[836 + board.get_castling_rights()];
+}
+
+void require_fen_round_trip(Board& board, const std::string& context) {
+    Board imported;
+    const auto fen = board.export_fen();
+    require(imported.import_fen(fen) && imported.export_fen() == fen,
+            context + ": exported FEN did not round-trip");
+    require(imported.get_hash() == board.get_hash() &&
+                imported.get_hash() == BoardTestAccess::recomputed_hash(imported) &&
+                imported.get_hash() == independent_fixed_hash(imported) &&
+                imported.legal_moves() == board.legal_moves() &&
+                imported.get_game_status() == board.get_game_status(),
+            context + ": round-trip changed hash, legal moves, or terminal status");
+}
+
+void test_fen_pawn_capture_and_special_action_counters() {
+    for (int side : {0, 1}) {
+        const int sign = side == 0 ? 1 : -1;
+        for (bool capture : {false, true}) {
+            for (SpecialMove special : {SpecialMove::None, SpecialMove::PromoteQueen,
+                                        SpecialMove::PromoteRook, SpecialMove::PromoteBishop,
+                                        SpecialMove::PromoteKnight}) {
+                Board board;
+                BoardTestAccess::empty(board, side, 2, 0);
+                BoardTestAccess::set_piece(board, 0, 3, 6);
+                BoardTestAccess::set_piece(board, 7, 3, -6);
+                const int from = special == SpecialMove::None ? 3 : (side == 0 ? 6 : 1);
+                BoardTestAccess::set_piece(board, from, 0, sign);
+                if (capture) BoardTestAccess::set_piece(board, from + sign, 1, -sign * 4);
+                auto root = board.export_fen();
+                root.replace(root.size() - 3, 3, "9 12");
+                require(board.import_fen(root), "pawn counter fixture import failed");
+                const auto hash = board.get_hash();
+                const Move move{from, 0, from + sign, capture ? 1 : 0, special};
+                require(board.make_move(move), "pawn/capture promotion counter move failed");
+                const auto fen = board.export_fen();
+                const int next_side = capture ? 1 - side : side;
+                const std::string expected = (next_side == 0 ? " w - " : " b - ")
+                    + std::string(capture ? "2" : "1") + " 0 "
+                    + (capture && side == 1 ? "13" : "12");
+                require(fen.substr(fen.find(' ')) == expected,
+                        "every pawn action or capture must reset halfmove clock");
+                require_fen_round_trip(board, "pawn/capture promotion");
+                board.rollback_move();
+                require(board.export_fen() == root && board.get_hash() == hash,
+                        "pawn/capture promotion rollback lost metadata");
+            }
+        }
+        Board board;
+        BoardTestAccess::empty(board, side, 2, 0);
+        BoardTestAccess::set_piece(board, 0, 3, 6);
+        BoardTestAccess::set_piece(board, 7, 3, -6);
+        BoardTestAccess::set_piece(board, 3, 0, sign * 4);
+        BoardTestAccess::set_piece(board, 3, 2, -sign * 2);
+        auto root = board.export_fen();
+        root.replace(root.size() - 3, 3, "9 12");
+        require(board.import_fen(root) && board.make_move(3, 0, 3, 2),
+                "nonpawn capture fixture failed");
+        const auto fen = board.export_fen();
+        require(fen.substr(fen.find(' ')) == (side == 0 ? " b - 2 0 12" : " w - 2 0 13"),
+                "nonpawn capture must reset clock and end the turn");
+        require_fen_round_trip(board, "nonpawn capture");
+        board.rollback_move();
+        require(board.export_fen() == root, "nonpawn capture rollback lost counters");
+        for (auto special : {SpecialMove::CastleKingside, SpecialMove::CastleQueenside}) {
+            const std::string castle_root = "r2k3r/8/8/8/8/8/8/R2K3R"
+                + std::string(side == 0 ? " w KQkq 1 9 12" : " b KQkq 1 9 12");
+            require(board.import_fen(castle_root), "castle import failed");
+            const int row = side == 0 ? 0 : 7;
+            require(board.make_move({row, 3, row, special == SpecialMove::CastleKingside ? 5 : 1,
+                                      special}), "imported castling move failed");
+            const auto castled = board.export_fen();
+            require(castled.substr(castled.find(' ')) ==
+                        (side == 0 ? " b kq 2 10 12" : " w KQ 2 10 13"),
+                    "castling must count as one quiet action and clear king rights");
+            require_fen_round_trip(board, "castling");
+            board.rollback_move();
+            require(board.export_fen() == castle_root, "castling rollback lost FEN state");
+        }
+    }
+}
+
+void test_fen_terminal_king_capture_and_structural_validation() {
+    for (int side : {0, 1}) {
+        Board board;
+        BoardTestAccess::empty(board, side, 2);
+        BoardTestAccess::set_piece(board, 0, 3, 6);
+        BoardTestAccess::set_piece(board, 7, 3, -6);
+        const int from = side == 0 ? 6 : 1;
+        const int to = side == 0 ? 7 : 0;
+        BoardTestAccess::set_piece(board, from, 3, side == 0 ? 4 : -4);
+        auto root = board.export_fen();
+        root.replace(root.size() - 3, 3, "9 12");
+        require(board.import_fen(root) && board.make_move(from, 3, to, 3),
+                "terminal capture FEN fixture failed");
+        require(board.get_game_status() == (side == 0 ? 1 : -1) &&
+                    board.get_castling_rights() == 0x0F,
+                "terminal capture fixture must retain captured king's rights");
+        require_fen_round_trip(board, "terminal capture with retained rights");
+        Board imported;
+        require(imported.import_fen(board.export_fen()) && imported.has_game_ended() &&
+                    imported.legal_moves().empty(), "one missing king must import as terminal");
+        const auto terminal = imported.export_fen();
+        require(!imported.make_move(0, 3, 1, 3) && imported.export_fen() == terminal,
+                "terminal imported board must reject further actions without changing metadata");
+        require(imported.import_fen(root) && !imported.has_game_ended(),
+                "reimport with both kings must clear a terminal result");
+        board.rollback_move();
+        require(board.export_fen() == root && !board.has_game_ended(),
+                "terminal capture rollback lost imported root");
+    }
+    Board board;
+    require(board.import_fen("8/8/8/8/8/8/3k4/3K4 w KQkq 2 0 1") &&
+                !board.has_game_ended() && board.valid_move(0, 3, 1, 3),
+            "structural import must permit adjacent kings and rights without rooks");
+    require(board.make_move(0, 3, 1, 3), "adjacent king capture fixture failed");
+    const auto before = board.export_fen();
+    const auto hash = board.get_hash();
+    const auto last = board.get_last_move();
+    for (const std::string placement : {"8/8/8/8/8/8/8/8", "3k4/8/8/8/8/8/8/3KK3",
+                                        "3kk3/8/8/8/8/8/8/3K4", "8/8/8/8/8/8/8/3KK3",
+                                        "3kk3/8/8/8/8/8/8/8"}) {
+        require(!board.import_fen(placement + " w - 2 0 1"),
+                "both missing or duplicate kings must be rejected");
+        require(board.export_fen() == before && board.get_hash() == hash &&
+                    board.get_game_status() == 1 && board.get_last_move() == last &&
+                    BoardTestAccess::undo_size(board) == 1,
+                "invalid king structure changed terminal state or history");
+    }
+    board.rollback_move();
+    require(!board.has_game_ended() && board.get_piece(1, 3) == -6,
+            "invalid king import damaged pre-existing terminal rollback");
+}
+
+void test_fen_metadata_is_not_position_identity() {
+    for (int side : {0, 1}) {
+        for (int actions : {1, 2}) {
+            for (int rights = 0; rights < 16; ++rights) {
+                std::string symbols;
+                for (int bit = 3; bit >= 0; --bit)
+                    if (rights & (1 << bit)) symbols += "KQkq"[bit];
+                if (symbols.empty()) symbols = "-";
+                const std::string prefix = "r2k3r/8/8/8/8/8/8/R2K3R"
+                    + std::string(side == 0 ? " w " : " b ") + symbols + " "
+                    + std::to_string(actions);
+                Board low, high;
+                require(low.import_fen(prefix + " 0 1") &&
+                            high.import_fen(prefix + " 18446744073709551615 18446744073709551615"),
+                        "metadata identity import failed");
+                require(low.get_hash() == high.get_hash() &&
+                            low.get_hash() == independent_fixed_hash(low) &&
+                            high.get_hash() == independent_fixed_hash(high) &&
+                            low.legal_moves() == high.legal_moves() &&
+                            low.get_castling_rights() == rights,
+                        "metadata affected identity or castling bits mapped incorrectly");
+                require_fen_round_trip(low, "castling-rights matrix");
+            }
+        }
+    }
+    Board board;
+    require(board.import_fen("3k4/8/8/8/3N4/8/8/3K4 b - 2 18446744073709551614 18446744073709551614"),
+            "near-limit counter import failed");
+    require(!board.make_move(3, 3, 5, 4), "wrong-side action should be rejected");
+    require(board.export_fen() ==
+                "3k4/8/8/8/3N4/8/8/3K4 b - 2 18446744073709551614 18446744073709551614",
+            "rejected action changed counters");
+    require(board.import_fen("3k4/8/8/8/3n4/8/8/3K4 b - 2 18446744073709551614 18446744073709551614") &&
+                board.make_move(3, 3, 5, 4) && board.make_move(5, 4, 3, 3),
+            "near-limit quiet sequence failed");
+    require(board.export_fen() ==
+                "3k4/8/8/8/3n4/8/8/3K4 w - 2 18446744073709551615 18446744073709551615",
+            "counters must reach maximum then saturate");
+}
+
+void test_fen_import_preserves_existing_hash_and_rule_tables() {
+    Board board;
+    BoardTestAccess::force_slot_collisions(board);
+    BoardTestAccess::customize_patterns(board);
+    const Board before = board;
+    const std::string fen = "3k4/8/8/8/3N4/8/P7/3K4 w - 2 8 9";
+    require(board.import_fen(fen) && BoardTestAccess::same_tables(board, before),
+            "import must not replace existing hash or movement-pattern maps");
+    require(board.get_hash() == BoardTestAccess::recomputed_hash(board) &&
+                (board.get_hash() & ((Hash{1} << 20) - 1)) == 0 &&
+                board.get_hash() != independent_fixed_hash(board),
+            "import must recompute within the existing altered hash space");
+    const auto legal = board.legal_moves();
+    require(board.valid_move(3, 3, 4, 3) && !board.valid_move(3, 3, 5, 4) &&
+                board.valid_move(1, 0, 3, 0) && !board.valid_move(1, 0, 2, 0),
+            "import reset custom movement patterns");
+    const auto hash = board.get_hash();
+    require(board.make_move(3, 3, 4, 3) &&
+                board.get_hash() == BoardTestAccess::recomputed_hash(board),
+            "altered-space incremental hash failed after import");
+    board.rollback_move();
+    require(board.export_fen() == fen && board.get_hash() == hash && board.legal_moves() == legal,
+            "altered-space rollback failed after import");
+    require(!board.import_fen("bad") && BoardTestAccess::same_tables(board, before),
+            "failed import changed existing hash/rule tables");
+}
+
+void test_fen_reachable_sequence_round_trips_and_reimports() {
+    Board board, imported;
+    std::vector<std::string> previous;
+    std::uint32_t selection = 0x3180;
+    for (int action = 0; action < 64; ++action) {
+        require_fen_round_trip(board, "reachable FEN action " + std::to_string(action));
+        const auto fen = board.export_fen();
+        require(imported.import_fen(fen) && imported.get_last_move() == Move{} &&
+                    BoardTestAccess::undo_size(imported) == 0,
+                "repeated import must establish a fresh root");
+        const auto legal = board.legal_moves();
+        if (legal.empty()) break;
+        selection = selection * 1664525u + 1013904223u;
+        const Move move = legal[selection % legal.size()];
+        previous.push_back(fen);
+        require(board.make_move(move) && imported.make_move(move) &&
+                    board.export_fen() == imported.export_fen() &&
+                    board.get_hash() == imported.get_hash(),
+                "round-tripped position did not execute the same action");
+    }
+    while (!previous.empty()) {
+        board.rollback_move();
+        require(board.export_fen() == previous.back(), "reachable FEN undo did not restore all fields");
+        require_fen_round_trip(board, "reachable FEN rollback");
+        previous.pop_back();
+    }
+}
+
+void test_fen_imported_metadata_survives_search_and_existing_undo() {
+    for (const std::string counters : {"17 42", "18446744073709551614 18446744073709551614"}) {
+        Board board;
+        const std::string root = "3k4/8/8/2r5/2R5/8/8/3K4 w - 2 " + counters;
+        require(board.import_fen(root), "imported search metadata fixture failed");
+        require(board.make_move(0, 3, 0, 4), "first search fixture action failed");
+        const Board first = board;
+        require(board.make_move(0, 4, 0, 5), "second search fixture action failed");
+        const Board before = board;
+        const auto fen = board.export_fen();
+        auto require_preserved = [&] {
+            require(same_board(board, before) && board.export_fen() == fen &&
+                        BoardTestAccess::undo_size(board) == 2,
+                    "search changed imported metadata, hash, last move or existing undo");
+        };
+        Engine tactical(board.get_current_turn(), 1);
+        EngineTestAccess::quiescence_score(tactical, board);
+        require_preserved();
+        Engine direct(board.get_current_turn(), 1);
+        Move move;
+        EngineTestAccess::search_score(direct, board, 1, NEGINF, INF, &move);
+        require_preserved();
+        Board checked = board;
+        require(checked.make_move(move), "direct search from imported metadata returned invalid move");
+        Engine iterative(board.get_current_turn(), 2);
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            require(iterative.find_best_move(board) && iterative.get_search_nodes() != 0,
+                    "cold/warm imported metadata search failed");
+            require_preserved();
+            Board selected = board;
+            require(selected.make_move(iterative.get_best_move()),
+                    "iterative search from imported metadata returned invalid move");
+        }
+        board.rollback_move();
+        require(same_board(board, first) && board.export_fen() == first.export_fen(),
+                "search damaged first existing undo entry");
+        board.rollback_move();
+        require(board.export_fen() == root && board.get_last_move() == Move{} &&
+                    BoardTestAccess::undo_size(board) == 0,
+                "search damaged imported root undo");
+    }
+}
+
+void test_fen_binary_input_rejection_preserves_imported_undo() {
+    Board board;
+    const std::string root = "3k4/8/8/8/8/8/8/3K4 w - 2 17 42";
+    require(board.import_fen(root) && board.make_move(0, 3, 0, 4),
+            "binary input fixture import/first action failed");
+    const Board first = board;
+    require(board.make_move(0, 4, 0, 5), "binary input fixture second action failed");
+    const Board before = board;
+    std::vector<std::string> invalid;
+    for (char byte : {'\0', static_cast<char>(0xFF)}) {
+        auto placement = root;
+        placement[0] = byte;
+        invalid.push_back(placement);
+        invalid.push_back(root + byte);
+        auto counter = root;
+        counter.insert(counter.size() - 2, 1, byte);
+        invalid.push_back(counter);
+    }
+    invalid.push_back(std::string(4096, '8') + "/8/8/8/8/8/8/3K4 w - 2 0 1");
+    for (const auto& fen : invalid) {
+        require(!board.import_fen(fen), "malformed binary/oversized rank input accepted");
+        require(same_board(board, before) && board.export_fen() == before.export_fen() &&
+                    BoardTestAccess::undo_size(board) == 2,
+                "malformed bytes changed imported position or undo history");
+    }
+    board.rollback_move();
+    require(same_board(board, first), "malformed bytes damaged first undo entry");
+    board.rollback_move();
+    require(board.export_fen() == root && board.get_last_move() == Move{},
+            "malformed bytes damaged imported root undo");
+}
 
 void test_quiet_cutoff_orders_subsequent_same_ply_sibling() {
     Board board;
@@ -545,7 +1019,8 @@ bool same_board(const Board& left, const Board& right) {
         && left.get_game_status() == right.get_game_status()
         && left.get_castling_rights() == right.get_castling_rights()
         && left.get_hash() == right.get_hash()
-        && left.get_last_move() == right.get_last_move();
+        && left.get_last_move() == right.get_last_move()
+        && BoardTestAccess::counters(left) == BoardTestAccess::counters(right);
 }
 
 void require_hash_matches_recomputed(const Board& board, const std::string& context) {
@@ -1742,6 +2217,17 @@ void test_colliding_children_cannot_corrupt_the_root_tt_move() {
 
 int main() {
     try {
+        test_fen_initial_export();
+        test_fen_import_replaces_position_at_a_new_root();
+        test_fen_rejects_malformed_input_transactionally();
+        test_fen_quiet_action_counters_and_rollback();
+        test_fen_pawn_capture_and_special_action_counters();
+        test_fen_terminal_king_capture_and_structural_validation();
+        test_fen_metadata_is_not_position_identity();
+        test_fen_import_preserves_existing_hash_and_rule_tables();
+        test_fen_reachable_sequence_round_trips_and_reimports();
+        test_fen_imported_metadata_survives_search_and_existing_undo();
+        test_fen_binary_input_rejection_preserves_imported_undo();
         test_quiet_cutoff_orders_subsequent_same_ply_sibling();
         test_killer_recency_duplicate_slots_and_ply_isolation();
         test_recursive_killers_use_true_action_ply();

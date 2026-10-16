@@ -1,8 +1,12 @@
 #include "board.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <iostream>
+#include <locale>
+#include <limits>
+#include <sstream>
 
 namespace {
 
@@ -123,6 +127,103 @@ Board::Board() {
     add_sliding_patterns(6, king_directions, 1);
 
     refresh_hash();
+}
+
+bool Board::import_fen(const std::string& fen) {
+    std::istringstream input(fen);
+    input.imbue(std::locale::classic());
+    std::array<std::string, 6> fields;
+    for (auto& field : fields)
+        if (!(input >> field)) return false;
+    std::string extra;
+    if (input >> extra) return false;
+
+    std::vector<std::vector<int>> placement(8, std::vector<int>(8, 0));
+    const std::string pieces = "kqrbnp PNBRQK";
+    int row = 7, column = 0;
+    int white_kings = 0, black_kings = 0;
+    bool previous_digit = false;
+    for (char token : fields[0]) {
+        if (token == '/') {
+            if (column != 8 || row == 0) return false;
+            --row;
+            column = 0;
+            previous_digit = false;
+        } else if (token >= '1' && token <= '8') {
+            if (previous_digit) return false;
+            column += token - '0';
+            if (column > 8) return false;
+            previous_digit = true;
+        } else {
+            const auto index = pieces.find(token);
+            if (index == std::string::npos || column >= 8) return false;
+            placement[row][column++] = static_cast<int>(index) - 6;
+            if (token == 'K') ++white_kings;
+            if (token == 'k') ++black_kings;
+            previous_digit = false;
+        }
+    }
+    if (row != 0 || column != 8) return false;
+    if (white_kings > 1 || black_kings > 1 || white_kings + black_kings == 0)
+        return false;
+    if (fields[1] != "w" && fields[1] != "b") return false;
+    std::uint8_t rights = 0;
+    if (fields[2] != "-") {
+        const std::string symbols = "KQkq";
+        for (char token : fields[2]) {
+            const auto bit = symbols.find(token);
+            if (bit == std::string::npos || (rights & (1u << bit))) return false;
+            rights |= static_cast<std::uint8_t>(1u << bit);
+        }
+    }
+    if (fields[3] != "1" && fields[3] != "2") return false;
+    std::uint64_t halfmove, fullmove;
+    auto parse_counter = [](const std::string& field, std::uint64_t& value) {
+        const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value);
+        return parsed.ec == std::errc{} && parsed.ptr == field.data() + field.size();
+    };
+    if (!parse_counter(fields[4], halfmove) || !parse_counter(fields[5], fullmove)
+        || fullmove == 0)
+        return false;
+
+    current_board = std::move(placement);
+    turn = fields[1] == "w" ? 0 : 1;
+    castling_rights = rights;
+    move_left = fields[3][0] - '0';
+    halfmove_clock = halfmove;
+    fullmove_number = fullmove;
+    game_status = white_kings == 0 ? -1 : (black_kings == 0 ? 1 : 0);
+    rollback.clear();
+    last_move = Move{};
+    refresh_hash();
+    return true;
+}
+
+std::string Board::export_fen() const {
+    constexpr char pieces[] = "kqrbnp PNBRQK";
+    std::string result;
+    for (int row = 7; row >= 0; --row) {
+        int empty = 0;
+        for (int piece : current_board[row]) {
+            if (piece == 0) {
+                ++empty;
+            } else {
+                if (empty != 0) result += static_cast<char>('0' + empty);
+                empty = 0;
+                result += pieces[piece + 6];
+            }
+        }
+        if (empty != 0) result += static_cast<char>('0' + empty);
+        if (row != 0) result += '/';
+    }
+    result += turn == 0 ? " w " : " b ";
+    constexpr char rights[] = "KQkq";
+    if (castling_rights == 0) result += '-';
+    for (int bit = 0; bit < 4; ++bit)
+        if (castling_rights & (1u << bit)) result += rights[bit];
+    result += " " + std::to_string(move_left) + " " + std::to_string(halfmove_clock)
+        + " " + std::to_string(fullmove_number);
+    return result;
 }
 
 auto Board::begin() -> std::vector<std::vector<int>>::iterator {
@@ -439,7 +540,9 @@ bool Board::make_move(const Move& requested_move) {
         game_status,
         castling_rights,
         last_move,
-        board_hash
+        board_hash,
+        halfmove_clock,
+        fullmove_number
     });
 
     board_hash ^= turn_hash.at(turn);
@@ -465,6 +568,12 @@ bool Board::make_move(const Move& requested_move) {
         set_piece_with_hash(home_row, new_rook_column, moved_piece > 0 ? 4 : -4);
     }
 
+    if (std::abs(moved_piece) == 1 || captured_piece != 0) {
+        halfmove_clock = 0;
+    } else if (halfmove_clock != std::numeric_limits<std::uint64_t>::max()) {
+        ++halfmove_clock;
+    }
+    const int previous_turn = turn;
     if (captured_piece != 0) {
         if (std::abs(captured_piece) == 6)
             game_status = -captured_piece / 6;
@@ -477,6 +586,8 @@ bool Board::make_move(const Move& requested_move) {
         }
     }
 
+    if (previous_turn == 1 && turn == 0
+        && fullmove_number != std::numeric_limits<std::uint64_t>::max()) ++fullmove_number;
     last_move = applied_move;
     board_hash ^= turn_hash.at(turn);
     board_hash ^= move_left_hash.at(move_left);
@@ -520,4 +631,6 @@ void Board::rollback_move() {
     castling_rights = state.old_castling_rights;
     last_move = state.old_last_move;
     board_hash = state.old_hash;
+    halfmove_clock = state.old_halfmove_clock;
+    fullmove_number = state.old_fullmove_number;
 }

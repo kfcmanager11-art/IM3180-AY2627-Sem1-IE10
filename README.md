@@ -86,6 +86,55 @@ The same evaluator injection is available through `ChessUI`'s optional White
 and Black evaluator constructor arguments; omitting them keeps the standard
 evaluator for both sides.
 
+## Variant FEN (Board API)
+
+`Board::import_fen(const std::string&)` returns `false` for invalid input;
+`Board::export_fen() const` returns a canonical six-field position string:
+
+```text
+piece_placement side_to_move castling actions_left halfmove_clock fullmove_number
+rnbkqbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBKQBNR w KQkq 1 0 1
+```
+
+This is a **custom variant FEN, not standard/Lichess-compatible FEN**. Field 4
+is exactly `1` or `2` remaining actions, not an en-passant square. Standard `-`
+and square tokens such as `e3` are rejected in that field. The actual starting
+back rank is `RNBKQBNR`: king on column d, queen on column e. Placement lists
+rank 8 first (Board row 7) and rank 1 last (row 0), with uppercase White pieces.
+The opening White turn has one action; later turns have two. Captures require
+two remaining actions and immediately end the turn. The game ends by king
+capture, not checkmate; this API does not change those rules.
+
+Import requires exactly six whitespace-separated fields and eight ranks of
+eight squares, using only `PNBRQK/pnbrqk` and empty runs `1`–`8` (no adjacent
+digits). Side is `w` or `b`; castling is `-` or unique `KQkq` letters in any
+order, exported in `KQkq` order. Counters accept unsigned decimal integers
+through `18446744073709551615` (`uint64_t`); halfmove must be at least zero and
+fullmove at least one. Leading zeroes and surrounding/inter-field whitespace
+are accepted and normalized; signs, overflow, missing fields, and extra fields
+are rejected.
+
+The halfmove clock resets on every pawn action or capture, otherwise increases
+on **each action**, including castling. The fullmove number increases only when
+Black's turn ends, by capture or its last quiet action, not after its first quiet
+action. Both counters saturate at the `uint64_t` maximum and are restored by
+rollback. They are metadata only: neither affects hashing, search, or draw rules.
+
+Validation is structural, not orthodox chess legality or a proof of reachability.
+Each side may have at most one king; both missing is invalid. Both present means
+ongoing, while one missing means a win for the side whose king remains. Adjacent
+kings and castling flags without corresponding home pieces are accepted, including
+flags left after a terminal king capture. Existing move validation still governs
+whether castling or any other action can actually be played.
+
+A failed import leaves the entire Board unchanged, including counters, hash,
+last move, and existing undo history. A successful import starts a new root:
+it clears undo history and last move, derives terminal status, recomputes the
+position hash using the Board's existing hash tables, and preserves movement
+patterns. Rollback at that imported root does nothing. FEN stores a position,
+not action history, repetition history, controllers, clocks, accounts, or saved
+matches. There is no clipboard, UI, or database integration in this Board API.
+
 ## Running the game
 
 After building, run `chess.exe` from the repository root (or the equivalent executable path for

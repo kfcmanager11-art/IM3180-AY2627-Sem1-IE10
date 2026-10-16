@@ -4,6 +4,7 @@
 #include<unordered_map>
 #include<cstdint>
 #include<array>
+#include<string>
 
 using Hash = std::uint64_t;
 
@@ -280,6 +281,8 @@ class Board{
         std::uint8_t old_castling_rights = 0;
         Move old_last_move;
         Hash old_hash = 0;
+        std::uint64_t old_halfmove_clock = 0;
+        std::uint64_t old_fullmove_number = 1;
     };
 
     std::vector<std::vector<int>> current_board{8, std::vector<int> (8, 0)};
@@ -292,6 +295,8 @@ class Board{
     int turn;
     int move_left;
     int game_status;
+    std::uint64_t halfmove_clock = 0;
+    std::uint64_t fullmove_number = 1;
     std::uint8_t castling_rights;
     Hash board_hash;
     Move last_move;
@@ -309,6 +314,8 @@ class Board{
 public:
     Board();
     ~Board() = default;
+    std::string export_fen() const;
+    bool import_fen(const std::string& fen);
 
     auto begin() -> std::vector<std::vector<int>>::iterator;
     auto end() -> std::vector<std::vector<int>>::iterator;
