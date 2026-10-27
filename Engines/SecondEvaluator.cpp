@@ -198,14 +198,14 @@ SecondEvaluator::Tapered SecondEvaluator::evaluate_position(const Board& board) 
             }
 
             // King Tropism: Bonus for non-pawn/non-king pieces being close to enemy king (middlegame only)
-            if (abs_piece >= 2 && abs_piece <= 5) {
+            if (abs_piece == 2 || abs_piece == 5) {
                 const int ek_row = king_row[enemy];
                 const int ek_col = king_col[enemy];
 
                 if (ek_row != -1 && ek_col != -1) {
-                    const int dist = std::abs(row - ek_row) + std::abs(col - ek_col);
-                    const int tropism_mg = (14 - dist) * 2;
-                    add_for(score, Tapered{tropism_mg, 0}, white);
+                    const int dist = std::max(std::abs(row - ek_row), std::abs(col - ek_col));
+                    const int closeness = std::max(0, 5 - dist);
+                    add_for(score, Tapered{closeness * (abs_piece == 5 ? 3 : 2), 0}, white);
                 }
             }
         }
