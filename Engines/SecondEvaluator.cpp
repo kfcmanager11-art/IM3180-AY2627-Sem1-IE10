@@ -18,7 +18,6 @@ constexpr std::array<int, 8> kPassedEg = {0, 10, 20, 40, 70, 120, 200, 0};
 constexpr Tapered kBishopPair{30, 50};
 constexpr Tapered kDoubledPawn{-10, -20};
 constexpr Tapered kIsolatedPawn{-10, -15};
-constexpr Tapered kConnectedPawn{7, 12};
 constexpr Tapered kRookOpenFile{20, 10};
 constexpr Tapered kRookSemiOpenFile{10, 5};
 constexpr int kKingShieldMg = 10;
@@ -120,18 +119,6 @@ SecondEvaluator::Tapered SecondEvaluator::evaluate_position(const Board& board) 
             if (abs_piece == 1) {
                 pawn_rows[side][col] |= 1 << row;
                 ++pawn_count[side][col];
-                
-                // Connected Pawn Check (Pawn chain)
-                const int defender_row = row - forward_dir(white);
-                if (defender_row >= 0 && defender_row < 8) {
-                    const int friendly_pawn = white ? 1 : -1;
-                    const bool left_defended = col > 0 && board.get_piece(defender_row, col - 1) == friendly_pawn;
-                    const bool right_defended = col < 7 && board.get_piece(defender_row, col + 1) == friendly_pawn;
-
-                    if (left_defended || right_defended) {
-                        add_for(score, kConnectedPawn, white);
-                    }
-                }
 
             } else if (abs_piece == 3) {
                 ++bishops[side];
@@ -195,18 +182,6 @@ SecondEvaluator::Tapered SecondEvaluator::evaluate_position(const Board& board) 
                 const bool enemy_pawn = pawn_count[enemy][col] > 0;
                 if (!own_pawn && !enemy_pawn) add_for(score, kRookOpenFile, white);
                 else if (!own_pawn) add_for(score, kRookSemiOpenFile, white);
-            }
-
-            // King Tropism: Bonus for non-pawn/non-king pieces being close to enemy king (middlegame only)
-            if (abs_piece == 2 || abs_piece == 5) {
-                const int ek_row = king_row[enemy];
-                const int ek_col = king_col[enemy];
-
-                if (ek_row != -1 && ek_col != -1) {
-                    const int dist = std::max(std::abs(row - ek_row), std::abs(col - ek_col));
-                    const int closeness = std::max(0, 5 - dist);
-                    add_for(score, Tapered{closeness * (abs_piece == 5 ? 3 : 2), 0}, white);
-                }
             }
         }
     }
