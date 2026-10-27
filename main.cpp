@@ -10,8 +10,8 @@ int main() {
         ChessUI ui(
             1,
             Engine::kDefaultSearchDepth,
-            std::make_unique<SecondEvaluator>(),
-            std::make_unique<NewEvaluator>()
+            std::make_unique<NewEvaluator>(),
+            std::make_unique<SecondEvaluator>()
         );
         ui.setAuthHandler([&](const std::string& username, const std::string& password, bool sign_up) {
             return store.authenticate(username, password, sign_up);
